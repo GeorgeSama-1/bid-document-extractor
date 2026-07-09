@@ -1,0 +1,68 @@
+{
+  "company_id": "demo_company",
+  "document_id": "business_doc_001",
+  "file_type": "商务文件",
+  "ocr_pages": [],
+  "ocr_sections": [
+    "企业营业执照扫描件",
+    "银行基本账户证明扫描件"
+  ],
+  "table_sections": [
+    "投标人基本情况表",
+    "股权信息",
+    "商务偏差表"
+  ],
+  "skip_sections": [],
+  "compound_material_rules": [
+    {
+      "excel_anchor_path": "商务文件 / 补充文件 / 财务状况 / 经会计师事务所或审计机构审计的财务会计报表",
+      "instance_title_patterns": [
+        "20\\d{2}.*(?:会计|财务|审计).*(?:报表|报告)"
+      ],
+      "auto_detect_children": true,
+      "store_unlisted_children": true,
+      "child_title_include_patterns": [],
+      "child_title_exclude_patterns": [
+        "商务投标文件",
+        "国网.*公司",
+        "^\\d+$"
+      ],
+      "child_title_rename_map": {
+        "合并利润表": "利润表",
+        "母公司利润表": "利润表"
+      }
+    }
+  ],
+  "section_overrides": {
+    "商务文件 / 投标人基本情况表": {
+      "expected_pages": [],
+      "parse_text": true,
+      "parse_table": true,
+      "use_ocr": false,
+      "content_type": "structured_field",
+      "reuse_method": "结构化字段填充",
+      "enter_long_term_library": true,
+      "review_required": true
+    },
+    "商务文件 / 企业营业执照扫描件": {
+      "expected_pages": [],
+      "parse_text": false,
+      "parse_table": false,
+      "use_ocr": true,
+      "content_type": "attachment",
+      "reuse_method": "附件召回",
+      "enter_long_term_library": true,
+      "review_required": true
+    },
+    "商务文件 / 投标保证金": {
+      "expected_pages": [],
+      "parse_text": true,
+      "parse_table": true,
+      "use_ocr": true,
+      "content_type": "project_specific_material",
+      "reuse_method": "仅本次归档",
+      "enter_long_term_library": false,
+      "review_required": true
+    }
+  }
+}
