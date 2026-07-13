@@ -1,0 +1,407 @@
+from __future__ import annotations
+
+import threading
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+from bid_knowledge.service.jobs.models import JobParameters, JobRecord, JobStatus
+from bid_knowledge.service.jobs.runner import RunCallbacks, RunResult
+from bid_knowledge.service.jobs.scheduler import GpuJobScheduler
+from bid_knowledge.service.jobs.secrets import SecretStore
+from bid_knowledge.service.jobs.store import JobStore
+
+
+def make_job(tmp_path: Path, job_id: str, gpu_id: str = "6") -> JobRecord:
+    return JobRecord(
+        id=job_id,
+        filename=f"{job_id}.pdf",
+        gpu_id=gpu_id,
+        run_name=f"job_{job_id}",
+        output_dir=str(tmp_path / "outputs" / f"job_{job_id}"),
+        parameters=JobParameters(
+            path_root="商务文件",
+            vlm_endpoint="https://vlm.internal/v1",
+            vlm_model="table-model",
+        ),
+    )
+
+
+def wait_until(predicate: Callable[[], bool], timeout: float = 5) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError("condition was not reached before timeout")
+
+
+class FakeRunningProcess:
+    def __init__(self, release: threading.Event) -> None:
+        self._release = release
+        self.terminated = threading.Event()
+        self.waited = threading.Event()
+
+    def terminate(self, timeout_seconds: float = 30) -> None:
+        self.terminated.set()
+        self._release.set()
+
+    def wait(self) -> int:
+        assert self._release.wait(timeout=5)
+        self.waited.set()
+        return -15 if self.terminated.is_set() else 0
+
+
+class ControlledRunner:
+    def __init__(self, held_jobs: set[str] | None = None) -> None:
+        self.held_jobs = held_jobs or set()
+        self.started: dict[str, threading.Event] = {}
+        self.releases: dict[str, threading.Event] = {}
+        self.handles: dict[str, FakeRunningProcess] = {}
+        self.results: dict[str, RunResult] = {}
+        self.raise_for: dict[str, Exception] = {}
+        self.call_order: list[str] = []
+        self.finished_order: list[str] = []
+        self._active = 0
+        self.max_active = 0
+        self._lock = threading.Lock()
+
+    def event_for(self, mapping: dict[str, threading.Event], job_id: str):
+        with self._lock:
+            return mapping.setdefault(job_id, threading.Event())
+
+    def run(
+        self,
+        job: JobRecord,
+        api_key: str,
+        callbacks: RunCallbacks,
+    ) -> RunResult:
+        started = self.event_for(self.started, job.id)
+        release = self.event_for(self.releases, job.id)
+        handle = FakeRunningProcess(release)
+        with self._lock:
+            self.handles[job.id] = handle
+            self.call_order.append(job.id)
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        callbacks.on_started(1000 + len(self.call_order), handle)
+        callbacks.on_output(f"output contains {api_key}")
+        callbacks.on_progress(2, 5, f"stage contains {api_key}")
+        started.set()
+        try:
+            if job.id in self.held_jobs:
+                assert release.wait(timeout=5)
+            if job.id in self.raise_for:
+                raise self.raise_for[job.id]
+            if handle.terminated.is_set():
+                return RunResult(exit_code=-15, cancelled=True, error=None)
+            return self.results.get(
+                job.id,
+                RunResult(exit_code=0, cancelled=False, error=None),
+            )
+        finally:
+            with self._lock:
+                self._active -= 1
+                self.finished_order.append(job.id)
+
+    def wait_started(self, job_id: str) -> None:
+        assert self.event_for(self.started, job_id).wait(timeout=5)
+
+    def release(self, job_id: str) -> None:
+        self.event_for(self.releases, job_id).set()
+
+
+def make_scheduler(tmp_path, runner, *, secrets=None, log_callback=None):
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    secrets = secrets or SecretStore()
+    scheduler = GpuJobScheduler(
+        store=store,
+        secrets=secrets,
+        runner=runner,
+        log_callback=log_callback,
+    )
+    return store, secrets, scheduler
+
+
+def persist_and_submit(store, secrets, scheduler, job, key=None) -> None:
+    store.create(job)
+    secrets.put(job.id, key if key is not None else f"key-{job.id}")
+    scheduler.submit(job)
+
+
+def test_same_gpu_runs_fifo_without_overlap(tmp_path) -> None:
+    runner = ControlledRunner(held_jobs={"first", "second"})
+    store, secrets, scheduler = make_scheduler(tmp_path, runner)
+    first = make_job(tmp_path, "first")
+    second = make_job(tmp_path, "second")
+    try:
+        persist_and_submit(store, secrets, scheduler, first)
+        persist_and_submit(store, secrets, scheduler, second)
+        runner.wait_started("first")
+
+        assert not runner.event_for(runner.started, "second").is_set()
+        runner.release("first")
+        runner.wait_started("second")
+        runner.release("second")
+        wait_until(lambda: store.get("second").status is JobStatus.SUCCEEDED)
+
+        assert runner.call_order == ["first", "second"]
+        assert runner.finished_order == ["first", "second"]
+        assert runner.max_active == 1
+    finally:
+        scheduler.shutdown()
+
+
+def test_different_gpus_run_in_parallel(tmp_path) -> None:
+    runner = ControlledRunner(held_jobs={"gpu6", "gpu7"})
+    store, secrets, scheduler = make_scheduler(tmp_path, runner)
+    try:
+        persist_and_submit(store, secrets, scheduler, make_job(tmp_path, "gpu6", "6"))
+        persist_and_submit(store, secrets, scheduler, make_job(tmp_path, "gpu7", "7"))
+
+        runner.wait_started("gpu6")
+        runner.wait_started("gpu7")
+        assert runner.max_active == 2
+        runner.release("gpu6")
+        runner.release("gpu7")
+        wait_until(lambda: store.get("gpu6").status is JobStatus.SUCCEEDED)
+        wait_until(lambda: store.get("gpu7").status is JobStatus.SUCCEEDED)
+    finally:
+        scheduler.shutdown()
+
+
+def test_queue_position_counts_only_queued_jobs_ahead_on_same_gpu(tmp_path) -> None:
+    runner = ControlledRunner(held_jobs={"running", "second", "third", "other"})
+    store, secrets, scheduler = make_scheduler(tmp_path, runner)
+    try:
+        persist_and_submit(store, secrets, scheduler, make_job(tmp_path, "running"))
+        runner.wait_started("running")
+        persist_and_submit(store, secrets, scheduler, make_job(tmp_path, "second"))
+        persist_and_submit(store, secrets, scheduler, make_job(tmp_path, "third"))
+        persist_and_submit(
+            store, secrets, scheduler, make_job(tmp_path, "other", gpu_id="7")
+        )
+        runner.wait_started("other")
+
+        assert scheduler.queue_position("running") is None
+        assert scheduler.queue_position("second") == 1
+        assert scheduler.queue_position("third") == 2
+        assert scheduler.queue_position("other") is None
+        assert scheduler.queue_position("missing") is None
+
+        runner.release("running")
+        runner.release("other")
+        runner.wait_started("second")
+        assert scheduler.queue_position("second") is None
+        assert scheduler.queue_position("third") == 1
+        runner.release("second")
+        runner.wait_started("third")
+        runner.release("third")
+    finally:
+        scheduler.shutdown()
+
+
+def test_cancel_queued_job_is_immediate_and_clears_secret(tmp_path) -> None:
+    runner = ControlledRunner(held_jobs={"running"})
+    store, secrets, scheduler = make_scheduler(tmp_path, runner)
+    try:
+        persist_and_submit(store, secrets, scheduler, make_job(tmp_path, "running"))
+        runner.wait_started("running")
+        persist_and_submit(store, secrets, scheduler, make_job(tmp_path, "queued"))
+
+        assert scheduler.cancel("queued") is True
+
+        cancelled = store.get("queued")
+        assert cancelled is not None
+        assert cancelled.status is JobStatus.CANCELLED
+        assert cancelled.finished_at is not None
+        assert secrets.get("queued") is None
+        assert not runner.event_for(runner.started, "queued").is_set()
+        assert scheduler.cancel("queued") is False
+        runner.release("running")
+    finally:
+        scheduler.shutdown()
+
+
+def test_cancel_running_waits_for_process_exit_then_updates_store_before_key_delete(
+    tmp_path,
+) -> None:
+    runner = ControlledRunner(held_jobs={"running"})
+    store = JobStore(tmp_path / "jobs.sqlite3")
+
+    class OrderingSecretStore(SecretStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.status_at_delete: JobStatus | None = None
+
+        def delete(self, job_id: str) -> str | None:
+            record = store.get(job_id)
+            self.status_at_delete = record.status if record is not None else None
+            return super().delete(job_id)
+
+    secrets = OrderingSecretStore()
+    scheduler = GpuJobScheduler(store=store, secrets=secrets, runner=runner)
+    job = make_job(tmp_path, "running")
+    try:
+        persist_and_submit(store, secrets, scheduler, job, key="sentinel-key")
+        runner.wait_started(job.id)
+
+        assert scheduler.cancel(job.id) is True
+
+        handle = runner.handles[job.id]
+        assert handle.terminated.is_set()
+        assert handle.waited.is_set()
+        assert store.get(job.id).status is JobStatus.CANCELLED
+        assert secrets.status_at_delete is JobStatus.CANCELLED
+        assert secrets.get(job.id) is None
+    finally:
+        scheduler.shutdown()
+
+
+def test_cancel_does_not_persist_terminal_state_until_handle_wait_confirms_exit(
+    tmp_path,
+) -> None:
+    started = threading.Event()
+    runner_can_return = threading.Event()
+    wait_entered = threading.Event()
+    confirm_exit = threading.Event()
+
+    class DelayedWaitHandle:
+        def terminate(self, timeout_seconds: float = 30) -> None:
+            runner_can_return.set()
+
+        def wait(self) -> int:
+            wait_entered.set()
+            assert confirm_exit.wait(timeout=5)
+            return -15
+
+    class RacingRunner:
+        def run(self, job, api_key, callbacks):
+            callbacks.on_started(4321, DelayedWaitHandle())
+            started.set()
+            assert runner_can_return.wait(timeout=5)
+            return RunResult(exit_code=-15, cancelled=True, error=None)
+
+    store, secrets, scheduler = make_scheduler(tmp_path, RacingRunner())
+    job = make_job(tmp_path, "racing")
+    persist_and_submit(store, secrets, scheduler, job, key="sentinel-key")
+    assert started.wait(timeout=5)
+    cancellation = threading.Thread(target=scheduler.cancel, args=(job.id,))
+    cancellation.start()
+    try:
+        assert wait_entered.wait(timeout=5)
+        time.sleep(0.05)
+
+        assert store.get(job.id).status is JobStatus.RUNNING
+        assert secrets.get(job.id) == "sentinel-key"
+
+        confirm_exit.set()
+        cancellation.join(timeout=5)
+        assert not cancellation.is_alive()
+        assert store.get(job.id).status is JobStatus.CANCELLED
+        assert secrets.get(job.id) is None
+    finally:
+        confirm_exit.set()
+        cancellation.join(timeout=5)
+        scheduler.shutdown()
+
+
+def test_cancel_during_spawn_failure_does_not_deadlock_without_process_handle(
+    tmp_path,
+) -> None:
+    run_entered = threading.Event()
+    let_spawn_fail = threading.Event()
+
+    class SpawnFailureRunner:
+        def run(self, job, api_key, callbacks):
+            run_entered.set()
+            assert let_spawn_fail.wait(timeout=5)
+            return RunResult(exit_code=-1, cancelled=False, error="spawn failed")
+
+    store, secrets, scheduler = make_scheduler(tmp_path, SpawnFailureRunner())
+    job = make_job(tmp_path, "spawn-race")
+    persist_and_submit(store, secrets, scheduler, job)
+    assert run_entered.wait(timeout=5)
+    cancellation = threading.Thread(target=scheduler.cancel, args=(job.id,), daemon=True)
+    cancellation.start()
+    let_spawn_fail.set()
+    cancellation.join(timeout=2)
+
+    assert not cancellation.is_alive()
+    assert store.get(job.id).status is JobStatus.CANCELLED
+    assert secrets.get(job.id) is None
+    scheduler.shutdown()
+
+
+def test_output_errors_and_progress_are_redacted_and_terminal_keys_are_cleared(
+    tmp_path,
+) -> None:
+    runner = ControlledRunner()
+    runner.results["failed"] = RunResult(
+        exit_code=9,
+        cancelled=False,
+        error="failure leaked key-failed",
+    )
+    runner.raise_for["raised"] = RuntimeError("exception leaked key-raised")
+    logs: list[tuple[str, str]] = []
+    store, secrets, scheduler = make_scheduler(
+        tmp_path,
+        runner,
+        log_callback=lambda job_id, line: logs.append((job_id, line)),
+    )
+    try:
+        for job_id in ("success", "failed", "raised"):
+            persist_and_submit(
+                store,
+                secrets,
+                scheduler,
+                make_job(tmp_path, job_id, gpu_id=job_id),
+            )
+
+        wait_until(lambda: store.get("success").status is JobStatus.SUCCEEDED)
+        wait_until(lambda: store.get("failed").status is JobStatus.FAILED)
+        wait_until(lambda: store.get("raised").status is JobStatus.FAILED)
+
+        assert all(secrets.get(job_id) is None for job_id in ("success", "failed", "raised"))
+        assert "key-failed" not in (store.get("failed").error or "")
+        assert "[REDACTED]" in (store.get("failed").error or "")
+        assert "key-raised" not in (store.get("raised").error or "")
+        assert "[REDACTED]" in (store.get("raised").error or "")
+        combined_logs = "\n".join(line for _job_id, line in logs)
+        assert "key-success" not in combined_logs
+        assert "key-failed" not in combined_logs
+        assert "key-raised" not in combined_logs
+        assert "[REDACTED]" in combined_logs
+        for job_id in ("success", "failed", "raised"):
+            record = store.get(job_id)
+            assert record.progress_stage == "stage contains [REDACTED]"
+    finally:
+        scheduler.shutdown()
+
+
+def test_shutdown_rejects_submission_cancels_queue_and_waits_for_running_exit(
+    tmp_path,
+) -> None:
+    runner = ControlledRunner(held_jobs={"running"})
+    store, secrets, scheduler = make_scheduler(tmp_path, runner)
+    running = make_job(tmp_path, "running")
+    queued = make_job(tmp_path, "queued")
+    persist_and_submit(store, secrets, scheduler, running)
+    runner.wait_started("running")
+    persist_and_submit(store, secrets, scheduler, queued)
+
+    scheduler.shutdown(timeout_seconds=5)
+
+    assert runner.handles["running"].terminated.is_set()
+    assert runner.handles["running"].waited.is_set()
+    assert store.get("running").status is JobStatus.CANCELLED
+    assert store.get("queued").status is JobStatus.CANCELLED
+    assert secrets.get("running") is None
+    assert secrets.get("queued") is None
+    assert not runner.event_for(runner.started, "queued").is_set()
+    with pytest.raises(RuntimeError, match="shut|accept"):
+        scheduler.submit(make_job(tmp_path, "late"))
+    assert scheduler.cancel("missing") is False
+    scheduler.shutdown(timeout_seconds=5)
