@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -80,6 +81,88 @@ def test_resolve_returns_nested_regular_file(tmp_path) -> None:
     assert resolved == nested.resolve()
 
 
+def test_open_file_reads_nested_regular_file_from_secure_descriptor(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    nested = output_root / "nested" / "result.json"
+    nested.parent.mkdir(parents=True)
+    nested.write_text('{"safe": true}', encoding="utf-8")
+
+    with JobFiles().open_file(output_root, "nested/result.json") as opened:
+        assert opened.read() == b'{"safe": true}'
+
+
+def test_open_file_rejects_file_replaced_by_symlink_after_resolve(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    victim = output_root / "result.txt"
+    outside = tmp_path / "outside.txt"
+    victim.write_text("safe", encoding="utf-8")
+    outside.write_text("secret", encoding="utf-8")
+    job_files = JobFiles()
+    assert job_files.resolve(output_root, "result.txt") == victim.resolve()
+    victim.unlink()
+    victim.symlink_to(outside)
+
+    with pytest.raises((FileNotFoundError, ValueError, OSError)):
+        job_files.open_file(output_root, "result.txt")
+
+
+def test_open_file_rejects_intermediate_directory_replaced_by_symlink(
+    tmp_path,
+) -> None:
+    output_root = tmp_path / "output"
+    nested = output_root / "nested"
+    outside_directory = tmp_path / "outside"
+    nested.mkdir(parents=True)
+    outside_directory.mkdir()
+    (nested / "result.txt").write_text("safe", encoding="utf-8")
+    (outside_directory / "result.txt").write_text("secret", encoding="utf-8")
+    job_files = JobFiles()
+    job_files.resolve(output_root, "nested/result.txt")
+    (nested / "result.txt").unlink()
+    nested.rmdir()
+    nested.symlink_to(outside_directory, target_is_directory=True)
+
+    with pytest.raises((FileNotFoundError, OSError)):
+        job_files.open_file(output_root, "nested/result.txt")
+
+
+def test_open_file_never_follows_concurrent_symlink_swaps(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    victim = output_root / "result.txt"
+    swap = output_root / "swap-entry"
+    outside = tmp_path / "outside.txt"
+    victim.write_bytes(b"safe")
+    outside.write_bytes(b"secret")
+    stop = threading.Event()
+    started = threading.Event()
+
+    def swap_repeatedly() -> None:
+        while not stop.is_set():
+            swap.unlink(missing_ok=True)
+            swap.symlink_to(outside)
+            os.replace(swap, victim)
+            started.set()
+            swap.write_bytes(b"safe")
+            os.replace(swap, victim)
+
+    attacker = threading.Thread(target=swap_repeatedly)
+    attacker.start()
+    try:
+        assert started.wait(timeout=5)
+        for _ in range(500):
+            try:
+                with JobFiles().open_file(output_root, "result.txt") as opened:
+                    assert opened.read() == b"safe"
+            except (FileNotFoundError, OSError):
+                pass
+    finally:
+        stop.set()
+        attacker.join(timeout=5)
+    assert not attacker.is_alive()
+
+
 def test_resolve_rejects_missing_and_directory_paths(tmp_path) -> None:
     output_root = tmp_path / "output"
     (output_root / "nested").mkdir(parents=True)
@@ -108,7 +191,76 @@ def test_archive_contains_only_nested_regular_output_files(tmp_path) -> None:
         assert bundle.read("nested/data.json") == b'{"ok": true}'
 
 
-@pytest.mark.parametrize("job_id", ["../escape", "nested/escape", "", ".", ".."])
+def test_archive_skips_file_replaced_by_symlink_before_secure_open(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    archive_root = tmp_path / "archives"
+    output_root.mkdir()
+    victim = output_root / "victim.txt"
+    outside = tmp_path / "outside.txt"
+    victim.write_text("safe", encoding="utf-8")
+    outside.write_text("secret", encoding="utf-8")
+    swapped = False
+
+    class SwappingJobFiles(JobFiles):
+        def open_file(self, output_root: Path, relative_path: str):
+            nonlocal swapped
+            if relative_path == "victim.txt" and not swapped:
+                victim.unlink()
+                victim.symlink_to(outside)
+                swapped = True
+            return super().open_file(output_root, relative_path)
+
+    archive = SwappingJobFiles().archive("swap-test", output_root, archive_root)
+
+    assert swapped
+    with zipfile.ZipFile(archive) as bundle:
+        assert "victim.txt" not in bundle.namelist()
+        assert b"secret" not in b"".join(bundle.read(name) for name in bundle.namelist())
+
+
+def test_archive_removes_temporary_file_when_writing_fails(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    archive_root = tmp_path / "archives"
+    output_root.mkdir()
+    (output_root / "result.txt").write_text("result", encoding="utf-8")
+
+    class FailingJobFiles(JobFiles):
+        def _write_archive(self, output_root: Path, temporary_path: Path) -> None:
+            temporary_path.write_bytes(b"partial")
+            raise RuntimeError("write failed")
+
+    with pytest.raises(RuntimeError, match="write failed"):
+        FailingJobFiles().archive("failed-job", output_root, archive_root)
+
+    assert not (archive_root / "failed-job.zip").exists()
+    assert list(archive_root.iterdir()) == []
+
+
+def test_portably_unsafe_names_are_excluded_and_cannot_be_opened(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    archive_root = tmp_path / "archives"
+    output_root.mkdir()
+    unsafe_names = ["..\\outside.txt", "C:outside.txt", "CON", "aux.txt", "trail. "]
+    for name in unsafe_names:
+        (output_root / name).write_text("secret", encoding="utf-8")
+    (output_root / "safe.txt").write_text("safe", encoding="utf-8")
+    job_files = JobFiles()
+
+    assert [item.path for item in job_files.list(output_root)] == ["safe.txt"]
+    for name in unsafe_names:
+        with pytest.raises(ValueError, match="unsafe"):
+            job_files.resolve(output_root, name)
+        with pytest.raises(ValueError, match="unsafe"):
+            job_files.open_file(output_root, name)
+
+    archive = job_files.archive("portable", output_root, archive_root)
+    with zipfile.ZipFile(archive) as bundle:
+        assert bundle.namelist() == ["safe.txt"]
+
+
+@pytest.mark.parametrize(
+    "job_id", ["../escape", "nested/escape", "", ".", "..", "CON"]
+)
 def test_archive_rejects_unsafe_job_ids(tmp_path, job_id) -> None:
     output_root = tmp_path / "output"
     output_root.mkdir()
@@ -172,3 +324,16 @@ def test_archives_for_different_jobs_use_independent_locks(tmp_path) -> None:
         )
 
     assert {archive.name for archive in archives} == {"job-a.zip", "job-b.zip"}
+
+
+def test_completed_archive_locks_are_released_from_registry(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    archive_root = tmp_path / "archives"
+    output_root.mkdir()
+    (output_root / "result.txt").write_text("result", encoding="utf-8")
+    job_files = JobFiles()
+
+    for index in range(20):
+        job_files.archive(f"job-{index}", output_root, archive_root)
+
+    assert job_files._archive_locks == {}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import subprocess
 from collections.abc import Callable
 from io import StringIO
@@ -32,8 +33,15 @@ CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 class NvidiaSmiInventory:
-    def __init__(self, run: CommandRunner = subprocess.run) -> None:
+    def __init__(
+        self,
+        run: CommandRunner = subprocess.run,
+        timeout: float = 10.0,
+    ) -> None:
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and greater than zero")
         self._run = run
+        self._timeout = float(timeout)
 
     def list(self) -> list[GpuInfo]:
         try:
@@ -42,7 +50,12 @@ class NvidiaSmiInventory:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=self._timeout,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise GpuInventoryError(
+                f"nvidia-smi timed out after {self._timeout:g} seconds"
+            ) from exc
         except FileNotFoundError as exc:
             raise GpuInventoryError(
                 "nvidia-smi was not found; NVIDIA drivers are unavailable"

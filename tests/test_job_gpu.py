@@ -44,7 +44,12 @@ def test_inventory_executes_exact_query_and_parses_all_gpu_fields() -> None:
     assert calls == [
         (
             EXPECTED_COMMAND,
-            {"capture_output": True, "text": True, "check": False},
+            {
+                "capture_output": True,
+                "text": True,
+                "check": False,
+                "timeout": 10.0,
+            },
         )
     ]
     assert [gpu.model_dump() for gpu in gpus] == [
@@ -102,6 +107,34 @@ def test_inventory_reports_nonzero_exit_clearly() -> None:
 
     with pytest.raises(GpuInventoryError, match="driver unavailable"):
         inventory.list()
+
+
+def test_inventory_uses_configured_finite_timeout() -> None:
+    calls = []
+
+    def run(*_args, **kwargs):
+        calls.append(kwargs)
+        return completed("6, NVIDIA L40S, 46068, 200")
+
+    NvidiaSmiInventory(run=run, timeout=2.5).list()
+
+    assert calls[0]["timeout"] == 2.5
+
+
+def test_inventory_reports_command_timeout_clearly() -> None:
+    def timed_out(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(EXPECTED_COMMAND, timeout=10.0)
+
+    inventory = NvidiaSmiInventory(run=timed_out)
+
+    with pytest.raises(GpuInventoryError, match="timed out.*10"):
+        inventory.list()
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+def test_inventory_rejects_non_finite_or_non_positive_timeout(timeout) -> None:
+    with pytest.raises(ValueError, match="timeout"):
+        NvidiaSmiInventory(timeout=timeout)
 
 
 @pytest.mark.parametrize("stdout", ["", "\n \n"])
