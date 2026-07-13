@@ -38,6 +38,28 @@ _UPDATE_FIELDS = {
     "progress_stage",
 }
 
+_SCHEMA_VERSION = 1
+
+_REQUIRED_COLUMNS = {
+    "id": "TEXT",
+    "filename": "TEXT",
+    "gpu_id": "TEXT",
+    "run_name": "TEXT",
+    "output_dir": "TEXT",
+    "parameters": "TEXT",
+    "status": "TEXT",
+    "progress_step": "INTEGER",
+    "progress_total": "INTEGER",
+    "progress_stage": "TEXT",
+    "created_at": "TEXT",
+    "updated_at": "TEXT",
+    "started_at": "TEXT",
+    "finished_at": "TEXT",
+    "pid": "INTEGER",
+    "exit_code": "INTEGER",
+    "error": "TEXT",
+}
+
 
 class JobStore:
     def __init__(self, database: str | Path) -> None:
@@ -57,12 +79,23 @@ class JobStore:
 
     def _initialize_schema(self) -> None:
         with self._connection() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS jobs (
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version not in (0, _SCHEMA_VERSION):
+                raise RuntimeError(
+                    f"Unsupported jobs database schema version {version}; "
+                    f"expected {_SCHEMA_VERSION}"
+                )
+
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+            ).fetchone()
+            if table_exists is None:
+                connection.execute(
+                    """
+                    CREATE TABLE jobs (
                     id TEXT PRIMARY KEY,
                     filename TEXT NOT NULL,
-                    gpu_id INTEGER NOT NULL,
+                    gpu_id TEXT NOT NULL,
                     run_name TEXT NOT NULL,
                     output_dir TEXT NOT NULL,
                     parameters TEXT NOT NULL,
@@ -78,7 +111,38 @@ class JobStore:
                     exit_code INTEGER,
                     error TEXT
                 )
-                """
+                    """
+                )
+
+            self._validate_schema(connection)
+            if version == 0:
+                connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+
+    @staticmethod
+    def _validate_schema(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]: str(row["type"]).upper()
+            for row in connection.execute("PRAGMA table_info(jobs)")
+        }
+        missing = _REQUIRED_COLUMNS.keys() - columns.keys()
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise RuntimeError(
+                f"Incompatible jobs database schema: missing required columns: {names}"
+            )
+
+        wrong_types = {
+            name: (columns[name], expected)
+            for name, expected in _REQUIRED_COLUMNS.items()
+            if columns[name] != expected
+        }
+        if wrong_types:
+            descriptions = ", ".join(
+                f"{name} is {actual or '<none>'}, expected {expected}"
+                for name, (actual, expected) in sorted(wrong_types.items())
+            )
+            raise RuntimeError(
+                f"Incompatible jobs database schema: column type mismatch: {descriptions}"
             )
 
     def create(self, job: JobRecord) -> JobRecord:
@@ -154,7 +218,17 @@ class JobStore:
                 updates["started_at"] = now
             if status in _TERMINAL_STATUSES:
                 updates["finished_at"] = now
-            self._execute_update(connection, job_id, updates)
+            updated_count = self._execute_update(
+                connection,
+                job_id,
+                expected_status=current.status,
+                updates=updates,
+            )
+            if updated_count != 1:
+                raise ValueError(
+                    f"Job status transition lost a concurrent update: "
+                    f"expected {current.status.value}"
+                )
             updated_row = connection.execute(
                 "SELECT * FROM jobs WHERE id = ?", (job_id,)
             ).fetchone()
@@ -162,17 +236,34 @@ class JobStore:
         return self._to_record(updated_row)
 
     def update_progress(self, job_id: str, step: int, total: int, stage: str) -> None:
+        if total < 0 or step < 0 or step > total:
+            raise ValueError(
+                f"Invalid progress: require total >= 0 and 0 <= step <= total; "
+                f"got step={step}, total={total}"
+            )
         with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE jobs
                 SET progress_step = ?, progress_total = ?, progress_stage = ?, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status = ?
                 """,
-                (step, total, stage, utc_now().isoformat(), job_id),
+                (
+                    step,
+                    total,
+                    stage,
+                    utc_now().isoformat(),
+                    job_id,
+                    JobStatus.RUNNING.value,
+                ),
             )
             if cursor.rowcount == 0:
-                raise KeyError(job_id)
+                exists = connection.execute(
+                    "SELECT 1 FROM jobs WHERE id = ?", (job_id,)
+                ).fetchone()
+                if exists is None:
+                    raise KeyError(job_id)
+                raise ValueError("Progress can only be updated while job is running")
 
     def mark_interrupted(self) -> int:
         now = utc_now().isoformat()
@@ -198,17 +289,19 @@ class JobStore:
     def _execute_update(
         connection: sqlite3.Connection,
         job_id: str,
+        expected_status: JobStatus,
         updates: dict[str, Any],
-    ) -> None:
+    ) -> int:
         serialized = {
             key: value.isoformat() if isinstance(value, datetime) else value
             for key, value in updates.items()
         }
         assignments = ", ".join(f"{key} = ?" for key in serialized)
-        connection.execute(
-            f"UPDATE jobs SET {assignments} WHERE id = ?",
-            (*serialized.values(), job_id),
+        cursor = connection.execute(
+            f"UPDATE jobs SET {assignments} WHERE id = ? AND status = ?",
+            (*serialized.values(), job_id, expected_status.value),
         )
+        return cursor.rowcount
 
     @staticmethod
     def _serialize_datetime(value: datetime | None) -> str | None:

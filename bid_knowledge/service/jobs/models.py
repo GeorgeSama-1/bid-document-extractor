@@ -22,7 +22,7 @@ class JobStatus(str, Enum):
 class JobParameters(BaseModel):
     """Non-secret command parameters safe to persist and return from the API."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     path_root: str = "PDF"
     pp_structure_use_doc_orientation_classify: bool = False
@@ -36,11 +36,11 @@ class JobParameters(BaseModel):
 
 
 class JobRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str = Field(default_factory=lambda: uuid4().hex)
     filename: str
-    gpu_id: int
+    gpu_id: str
     run_name: str
     output_dir: str
     parameters: JobParameters
