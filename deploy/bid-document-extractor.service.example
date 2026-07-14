@@ -1,0 +1,18 @@
+[Unit]
+Description=Bid Document Extractor GPU Web Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/ABSOLUTE/PATH/TO/bid_source/bid-document-extractor
+EnvironmentFile=/etc/bid-document-extractor.env
+ExecStart=/ABSOLUTE/PATH/TO/GPU_ENV/bin/python -m scripts.run_service
+KillMode=control-group
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
