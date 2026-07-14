@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Barrier
 
 import pytest
@@ -42,7 +42,7 @@ def test_create_and_get_round_trip(tmp_path) -> None:
 
 def test_list_returns_newest_jobs_first(tmp_path) -> None:
     store = JobStore(tmp_path / "jobs.sqlite3")
-    older_time = datetime(2026, 7, 13, 10, tzinfo=UTC)
+    older_time = datetime(2026, 7, 13, 10, tzinfo=timezone.utc)
     newer_time = older_time + timedelta(minutes=1)
     older = make_job(id="older", created_at=older_time, updated_at=older_time)
     newer = make_job(id="newer", created_at=newer_time, updated_at=newer_time)
