@@ -53,35 +53,112 @@ pip install -r requirements.txt
 pip install -r requirements-vector.txt
 ```
 
+## GPU Web 服务
+
+项目提供面向单用户可信内网的 GPU 文档提取服务。浏览器访问 `http://172.20.0.160:8000` 后，可一次上传一个 PDF，选择服务器物理 GPU，并配置目录根名、三个 PP-Structure 预处理开关、VLM Endpoint、模型、API Key、timeout、max tokens 和 workers。页面会显示队列位置、阶段进度、脱敏日志、错误和取消操作；任务成功后可浏览结果并下载轻量素材 ZIP。
+
+服务必须使用已经安装 GPU 版 PaddlePaddle、PaddleOCR 及项目依赖的 Python 环境，并以单实例、单 Uvicorn worker 运行。同一张 GPU 上的任务严格 FIFO 串行，不同 GPU 的任务可以并行。服务监听 `0.0.0.0:8000`，不提供登录或 HTTPS，只能通过主机防火墙开放给可信内网，禁止直接暴露到公网。
+
+API Key 只保存在服务进程内存和任务子进程的 `VLM_API_KEY` 环境变量中，不进入 SQLite、命令行参数、日志、API 响应、输出文件或 ZIP。任务结束、取消或服务关闭后会清除内存中的 Key。页面提交成功后也会立即清空密码输入框，不会把 Key 写入 URL 或浏览器存储。
+
+### systemd 部署
+
+先编辑示例中的绝对项目路径、GPU Python 环境和运行用户，再安装并启动：
+
+```bash
+cd /ABSOLUTE/PATH/TO/bid_source/bid-document-extractor
+/ABSOLUTE/PATH/TO/GPU_ENV/bin/python -m pip install -r requirements.txt
+sudo cp deploy/bid-document-extractor.env.example /etc/bid-document-extractor.env
+sudo cp deploy/bid-document-extractor.service.example /etc/systemd/system/bid-document-extractor.service
+sudoedit /etc/bid-document-extractor.env
+sudoedit /etc/systemd/system/bid-document-extractor.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now bid-document-extractor.service
+sudo systemctl status bid-document-extractor.service
+sudo journalctl -u bid-document-extractor.service -f
+```
+
+完整安装说明见 `deploy/SERVER_INSTALL.md`。不要增加 Uvicorn worker 数量，也不要复制 unit 启动第二实例；`service_data/service.lock` 会阻止多实例破坏进程内队列和密钥隔离。
+
+任务成功后，页面只提供轻量素材 ZIP 下载，不展示中间文件列表或单文件下载入口。Web 归档直接复用 `scripts/export_material_pack.py` 背后的 `export_lightweight_material_pack()`，收集全部章节的 `material.md` 和 `image_items` 图片，不包含 `table_items/*.json`、图片 JSON、`ordered_material.json`、解析缓存和日志。ZIP 使用上传 PDF 去掉扩展名后的名称作为父目录，例如：
+
+```text
+material/
+└── history/
+    ├── 1、……/
+    │   └── material.md
+    ├── 2、……/
+    ├── 3、补充文件/
+    │   └── ……/
+    │       ├── material.md
+    │       └── image_items/
+    └── 4、……/
+```
+
+`modules` 和表单中的逻辑 `path_root` 不会出现在 ZIP 中；`material.md` 内的图片引用会改写为可移植的相对路径。归档过程拒绝路径穿越与符号链接。
+
+### 清空 Web 历史
+
+必须先停止服务，避免任务数据库、锁文件和输出目录仍在使用：
+
+```bash
+sudo systemctl stop bid-document-extractor.service
+cd /ABSOLUTE/PATH/TO/bid_source
+
+# 清除任务数据库、上传副本、日志、锁文件和 ZIP 缓存。
+rm -rf -- service_data
+
+# 只清除 Web 服务生成的任务输出，保留其他手工流水线结果。
+find outputs -mindepth 1 -maxdepth 1 \
+  -type d -name 'job_*' \
+  -exec rm -rf -- {} +
+
+sudo systemctl start bid-document-extractor.service
+```
+
+如果只想清除浏览器任务历史并保留 `outputs/job_*` 解析结果，只删除 `service_data`。不要删除 `bid-document-extractor` 仓库、原始输入 PDF 或整个 `outputs` 目录。
+
+常见故障检查：
+
+- GPU 列表为空或报错：用 systemd 运行用户执行 `nvidia-smi`，确认驱动和 GPU 权限。
+- PaddleOCR 启动失败：确认 unit 的 `ExecStart` 指向安装了 GPU 依赖的 Python 环境。
+- 第二实例无法启动：确认旧服务和子进程已经退出，再检查 `systemctl status` 与日志；不要手工删除仍被持有的锁来并行启动。
+- 任务排队不动：确认所选 GPU 上前一个任务是否仍在运行，必要时从页面取消并查看脱敏日志。
+- 上传被拒绝：检查 PDF 扩展名、`%PDF` 文件头和 `BID_SERVICE_MAX_UPLOAD_BYTES`。
+
 ## 目录结构
 
 ```text
-bid-document-extractor/
-├── bid_knowledge/              # 核心代码
-│   ├── cli.py                  # CLI 入口
-│   ├── config/                 # 规则加载、手动配置、处理计划构建
-│   ├── parsing/                # PDF 解析、表格抽取、OCR、章节重建、素材打包
-│   ├── matching/               # 规则与章节匹配
-│   ├── extraction/             # 候选信息抽取、策略路由、chunk 构建
-│   ├── retrieval/              # BM25/向量检索、召回评估
-│   ├── service/                # MCP Server、素材上下文服务
-│   ├── export/                 # 轻量级素材包导出
-│   ├── schemas/                # Pydantic 数据模型
-│   └── utils/                  # 工具函数
-├── data/                       # 数据目录
-│   ├── raw/                    # 原始标书文件（PDF、Excel）
-│   ├── configs/                # 配置文件
-│   └── test_queries.json       # 测试查询
-├── scripts/                    # 脚本
-├── outputs/                    # 输出目录
-├── tests/                      # 测试
-├── docs/                       # 文档
-├── requirements.txt
-├── requirements-vector.txt
-└── README.md
+bid_source/
+├── data/                           # 数据目录（与 bid-document-extractor 平级）
+│   ├── raw/                        # 原始标书文件（PDF、Excel）
+│   ├── configs/                    # 配置文件
+│   └── test_queries.json           # 测试查询
+├── outputs/                        # 输出目录（与 bid-document-extractor 平级）
+├── service_data/                   # Web 任务数据库、上传副本、日志、锁和 ZIP 缓存
+└── bid-document-extractor/         # 核心代码
+    ├── bid_knowledge/              # 核心代码
+    │   ├── cli.py                  # CLI 入口
+    │   ├── config/                 # 规则加载、手动配置、处理计划构建
+    │   ├── parsing/                # PDF 解析、表格抽取、OCR、章节重建、素材打包
+    │   ├── matching/               # 规则与章节匹配
+    │   ├── extraction/             # 候选信息抽取、策略路由、chunk 构建
+    │   ├── retrieval/              # BM25/向量检索、召回评估
+    │   ├── service/                # MCP Server、素材上下文服务
+    │   ├── export/                 # 轻量级素材包导出
+    │   ├── schemas/                # Pydantic 数据模型
+    │   └── utils/                  # 工具函数
+    ├── scripts/                    # 脚本
+    ├── tests/                      # 测试
+    ├── docs/                       # 文档
+    ├── requirements.txt
+    ├── requirements-vector.txt
+    └── README.md
 ```
 
 ## 两条独立流水线
+
+以下命令默认在 `bid_source/` 根目录执行。代码在 `bid-document-extractor/` 下，但输入文件默认从根目录 `data/` 读取，输出默认写入根目录 `outputs/`。
 
 ### Pipeline 1：PDF 目录驱动（推荐，不需要 Excel 规则）
 
@@ -90,13 +167,13 @@ bid-document-extractor/
 ```bash
 # 基础用法
 python -m bid_knowledge.cli pdf-toc-pipeline \
-  --pdf data/raw/2、商务文件.pdf \
+  --pdf "2、商务文件.pdf" \
   --out-dir outputs/pdf_toc_run \
   --path-root "商务文件"
 
 # 完整用法（启用 PP-Structure + VLM 表格增强）
 CUDA_VISIBLE_DEVICES=6 python -m bid_knowledge.cli pdf-toc-pipeline \
-  --pdf data/raw/2、商务文件.pdf \
+  --pdf "2、商务文件.pdf" \
   --out-dir outputs/pdf_toc_run_business_v11 \
   --path-root "商务文件" \
   --enable-pp-structure true \
@@ -138,9 +215,9 @@ CUDA_VISIBLE_DEVICES=6 python -m bid_knowledge.cli pdf-toc-pipeline \
 
 ```bash
 python -m bid_knowledge.cli pipeline \
-  --rules-xlsx data/raw/价格文件-商务文件-技术文件章节分析.xlsx \
-  --pdf data/raw/2、商务文件.pdf \
-  --manual-config data/configs/manual_config.example.json \
+  --rules-xlsx "价格文件-商务文件-技术文件章节分析.xlsx" \
+  --pdf "2、商务文件.pdf" \
+  --manual-config manual_config.example.json \
   --out-dir outputs/rule_run \
   --enable-ocr false
 ```
@@ -452,20 +529,12 @@ export BID_MATERIAL_PROJECTS_CONFIG=data/configs/material_projects.json
 python -m bid_knowledge.service.mcp_server
 ```
 
-或通过 CLI：
-
-```bash
-python -m bid_knowledge.cli serve-mcp \
-  --outputs-dir outputs \
-  --projects-config data/configs/material_projects.json
-```
-
 ## 素材导出
 
-导出轻量级素材包（ZIP）：
+命令行和 Web 服务共用 `export_lightweight_material_pack()`。命令行默认导出全部 `modules/**/material.md` 和 `image_items` 图片，默认不包含 `table_items/*.json`：
 
 ```bash
-python scripts/export_material_pack.py \
+python bid-document-extractor/scripts/export_material_pack.py \
   --output-dir outputs/pdf_toc_run_business_v11 \
   --package-dir /tmp/material_pack \
   --zip outputs/material_pack.zip \
@@ -488,7 +557,7 @@ python scripts/export_material_pack.py \
 - 表格结构还原目前以二维行列为主，没有做复杂跨行跨列恢复。
 - OCR 接口假定兼容类 OpenAI Chat Completions 风格返回，复杂自定义协议还需要适配。
 - 向量召回是 optional，缺依赖时不会阻断主流程。
-- 这一版没有数据库、没有审核 UI、没有对象存储。
+- 这一版没有正式业务数据库、多人审核与权限 UI、对象存储；Web 服务中的 SQLite 仅保存非敏感任务状态。
 
 ## 后续迭代方向
 
