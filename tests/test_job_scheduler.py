@@ -405,3 +405,196 @@ def test_shutdown_rejects_submission_cancels_queue_and_waits_for_running_exit(
         scheduler.submit(make_job(tmp_path, "late"))
     assert scheduler.cancel("missing") is False
     scheduler.shutdown(timeout_seconds=5)
+
+
+@pytest.mark.parametrize("failure_point", ["terminate", "wait"])
+def test_cancel_failure_unblocks_worker_redacts_error_and_runs_next_job(
+    tmp_path, failure_point
+) -> None:
+    first_started = threading.Event()
+    first_release = threading.Event()
+    second_started = threading.Event()
+
+    class FaultyHandle:
+        def __init__(self) -> None:
+            self.cancel_requested = False
+
+        def terminate(self, timeout_seconds: float = 30) -> None:
+            self.cancel_requested = True
+            if failure_point == "terminate":
+                raise RuntimeError("terminate exposed sentinel-key")
+            first_release.set()
+
+        def wait(self) -> int:
+            if failure_point == "wait":
+                raise RuntimeError("wait exposed sentinel-key")
+            return -15
+
+    class FaultyCancellationRunner:
+        def run(self, job, api_key, callbacks):
+            if job.id == "first":
+                handle = FaultyHandle()
+                callbacks.on_started(4321, handle)
+                first_started.set()
+                assert first_release.wait(timeout=5)
+                return RunResult(
+                    exit_code=-15 if handle.cancel_requested else 0,
+                    cancelled=handle.cancel_requested,
+                    error=None,
+                )
+            callbacks.on_started(4322, FakeRunningProcess(threading.Event()))
+            second_started.set()
+            return RunResult(exit_code=0, cancelled=False, error=None)
+
+    store, secrets, scheduler = make_scheduler(tmp_path, FaultyCancellationRunner())
+    first = make_job(tmp_path, "first")
+    second = make_job(tmp_path, "second")
+    try:
+        persist_and_submit(store, secrets, scheduler, first, key="sentinel-key")
+        persist_and_submit(store, secrets, scheduler, second, key="second-key")
+        assert first_started.wait(timeout=5)
+
+        with pytest.raises(RuntimeError, match="Cancellation failed") as raised:
+            scheduler.cancel(first.id)
+        assert "sentinel-key" not in str(raised.value)
+
+        first_release.set()
+        assert second_started.wait(timeout=5)
+        wait_until(lambda: store.get(second.id).status is JobStatus.SUCCEEDED)
+        wait_until(lambda: secrets.get(first.id) is None)
+
+        first_record = store.get(first.id)
+        assert first_record.status is JobStatus.FAILED
+        assert "sentinel-key" not in (first_record.error or "")
+        assert "[REDACTED]" in (first_record.error or "")
+        assert secrets.get(second.id) is None
+    finally:
+        first_release.set()
+        scheduler.shutdown(timeout_seconds=5)
+
+
+class FaultingTerminalStore:
+    def __init__(self, store: JobStore, failures: int | None) -> None:
+        self._store = store
+        self._remaining = failures
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+    def update_status(self, job_id, status, **fields):
+        if status in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}:
+            if self._remaining is None or self._remaining > 0:
+                if self._remaining is not None:
+                    self._remaining -= 1
+                raise RuntimeError(f"terminal write exposed key-{job_id}")
+        return self._store.update_status(job_id, status, **fields)
+
+
+def test_terminal_update_is_retried_without_stopping_gpu_worker(tmp_path) -> None:
+    base_store = JobStore(tmp_path / "jobs.sqlite3")
+    store = FaultingTerminalStore(base_store, failures=1)
+    secrets = SecretStore()
+    runner = ControlledRunner()
+    scheduler = GpuJobScheduler(store=store, secrets=secrets, runner=runner)
+    try:
+        for job_id in ("first", "second"):
+            persist_and_submit(store, secrets, scheduler, make_job(tmp_path, job_id))
+
+        wait_until(lambda: base_store.get("second").status is JobStatus.SUCCEEDED)
+
+        assert runner.call_order == ["first", "second"]
+        assert base_store.get("first").status is JobStatus.SUCCEEDED
+        assert secrets.get("first") is None
+        assert secrets.get("second") is None
+    finally:
+        scheduler.shutdown(timeout_seconds=5)
+
+
+def test_persistent_terminal_update_records_health_error_and_worker_continues(
+    tmp_path,
+) -> None:
+    base_store = JobStore(tmp_path / "jobs.sqlite3")
+    store = FaultingTerminalStore(base_store, failures=None)
+    secrets = SecretStore()
+    runner = ControlledRunner()
+    scheduler = GpuJobScheduler(store=store, secrets=secrets, runner=runner)
+    try:
+        for job_id in ("first", "second"):
+            persist_and_submit(store, secrets, scheduler, make_job(tmp_path, job_id))
+
+        runner.wait_started("second")
+        wait_until(lambda: secrets.get("second") is None)
+
+        assert runner.call_order == ["first", "second"]
+        assert secrets.get("first") is None
+        errors = scheduler.health_errors()
+        assert "6/first" in errors
+        assert "key-first" not in errors["6/first"]
+        assert "[REDACTED]" in errors["6/first"]
+    finally:
+        scheduler.shutdown(timeout_seconds=5)
+
+
+def test_log_callback_failure_does_not_kill_worker_or_leak_secret(tmp_path) -> None:
+    runner = ControlledRunner()
+
+    def broken_log_callback(_job_id: str, _line: str) -> None:
+        raise RuntimeError("log callback exposed key-first")
+
+    store, secrets, scheduler = make_scheduler(
+        tmp_path, runner, log_callback=broken_log_callback
+    )
+    try:
+        for job_id in ("first", "second"):
+            persist_and_submit(store, secrets, scheduler, make_job(tmp_path, job_id))
+
+        wait_until(lambda: runner.call_order == ["first", "second"])
+        wait_until(lambda: store.get("second").status is JobStatus.FAILED)
+
+        assert runner.call_order == ["first", "second"]
+        assert secrets.get("first") is None
+        assert secrets.get("second") is None
+        assert "key-first" not in (store.get("first").error or "")
+        assert "[REDACTED]" in (store.get("first").error or "")
+    finally:
+        scheduler.shutdown(timeout_seconds=5)
+
+
+def test_shutdown_times_out_deterministically_when_cancel_cannot_stop_job(
+    tmp_path,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class UnstoppableHandle:
+        def terminate(self, timeout_seconds: float = 30) -> None:
+            raise RuntimeError("terminate exposed sentinel-key")
+
+        def wait(self) -> int:
+            raise AssertionError("wait must not run after terminate fails")
+
+    class UnstoppableRunner:
+        def run(self, job, api_key, callbacks):
+            callbacks.on_started(9876, UnstoppableHandle())
+            started.set()
+            assert release.wait(timeout=5)
+            return RunResult(exit_code=0, cancelled=False, error=None)
+
+    store, secrets, scheduler = make_scheduler(tmp_path, UnstoppableRunner())
+    job = make_job(tmp_path, "stuck")
+    persist_and_submit(store, secrets, scheduler, job, key="sentinel-key")
+    assert started.wait(timeout=5)
+    try:
+        before = time.monotonic()
+        with pytest.raises(TimeoutError, match="GPU 6 worker shutdown"):
+            scheduler.shutdown(timeout_seconds=0.05)
+        assert time.monotonic() - before < 1
+
+        release.set()
+        wait_until(lambda: secrets.get(job.id) is None)
+        record = store.get(job.id)
+        assert record.status is JobStatus.FAILED
+        assert "sentinel-key" not in (record.error or "")
+    finally:
+        release.set()
+        scheduler.shutdown(timeout_seconds=5)

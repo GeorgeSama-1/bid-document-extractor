@@ -24,7 +24,9 @@ class _JobEntry:
     state: _EntryState = "queued"
     handle: Any | None = None
     cancel_requested: bool = False
-    cancel_exit_confirmed: bool = False
+    cancel_attempt_done: bool = False
+    exit_confirmed: bool = False
+    cancel_error: str | None = None
 
 
 @dataclass
@@ -56,6 +58,7 @@ class GpuJobScheduler:
         self._condition = Condition()
         self._entries: dict[str, _JobEntry] = {}
         self._workers: dict[str, _GpuWorker] = {}
+        self._health_errors: dict[str, str] = {}
         self._accepting = True
         self._shutdown_complete = False
 
@@ -104,16 +107,37 @@ class GpuJobScheduler:
             if entry.state == "terminal":
                 return True
             handle = entry.handle
+            api_key = self._secrets.get(job_id) or ""
 
-        handle.terminate(timeout_seconds=30)
-        handle.wait()
+        cancellation_error: str | None = None
+        exit_confirmed = False
+        try:
+            handle.terminate(timeout_seconds=30)
+            handle.wait()
+            exit_confirmed = True
+        except Exception as exc:
+            cancellation_error = self._format_error(
+                "Cancellation failed", exc, api_key
+            )
+        finally:
+            with self._condition:
+                entry.cancel_attempt_done = True
+                entry.exit_confirmed = exit_confirmed
+                entry.cancel_error = cancellation_error
+                self._condition.notify_all()
+
+        if cancellation_error is not None:
+            raise RuntimeError(cancellation_error) from None
 
         with self._condition:
-            entry.cancel_exit_confirmed = True
-            self._condition.notify_all()
             while entry.state != "terminal":
                 self._condition.wait()
         return True
+
+    def health_errors(self) -> dict[str, str]:
+        """Return a snapshot of scheduler errors that could not be persisted."""
+        with self._condition:
+            return dict(self._health_errors)
 
     def queue_position(self, job_id: str) -> int | None:
         with self._condition:
@@ -161,12 +185,24 @@ class GpuJobScheduler:
                 if entry.state == "terminal":
                     continue
                 handle = entry.handle
+                api_key = self._secrets.get(entry.job.id) or ""
             remaining = max(0.0, deadline - time.monotonic())
-            handle.terminate(timeout_seconds=remaining)
-            handle.wait()
-            with self._condition:
-                entry.cancel_exit_confirmed = True
-                self._condition.notify_all()
+            cancellation_error: str | None = None
+            exit_confirmed = False
+            try:
+                handle.terminate(timeout_seconds=remaining)
+                handle.wait()
+                exit_confirmed = True
+            except Exception as exc:
+                cancellation_error = self._format_error(
+                    "Cancellation failed during shutdown", exc, api_key
+                )
+            finally:
+                with self._condition:
+                    entry.cancel_attempt_done = True
+                    entry.exit_confirmed = exit_confirmed
+                    entry.cancel_error = cancellation_error
+                    self._condition.notify_all()
 
         for worker in workers:
             worker.queue.put(_STOP)
@@ -190,14 +226,21 @@ class GpuJobScheduler:
             worker.pending.remove(entry.job.id)
         except ValueError:
             pass
-        self._store.update_status(entry.job.id, JobStatus.CANCELLED)
-        self._secrets.delete(entry.job.id)
-        entry.state = "terminal"
-        self._condition.notify_all()
+        api_key = self._secrets.get(entry.job.id) or ""
+        try:
+            self._persist_terminal_status_locked(
+                entry,
+                JobStatus.CANCELLED,
+                {},
+                api_key,
+            )
+        finally:
+            self._finish_entry_locked(entry, api_key)
 
     def _worker_main(self, worker: _GpuWorker) -> None:
         while True:
             queued_item = worker.queue.get()
+            entry: _JobEntry | None = None
             try:
                 if queued_item is _STOP:
                     return
@@ -213,6 +256,8 @@ class GpuJobScheduler:
                     entry.state = "running"
                     self._condition.notify_all()
                 self._run_entry(entry)
+            except Exception as exc:
+                self._recover_worker_failure(worker, queued_item, entry, exc)
             finally:
                 worker.queue.task_done()
 
@@ -226,8 +271,10 @@ class GpuJobScheduler:
         def on_started(pid: int, handle: Any) -> None:
             with self._condition:
                 entry.handle = handle
-                self._store.update_status(job.id, JobStatus.RUNNING, pid=pid)
-                self._condition.notify_all()
+                try:
+                    self._store.update_status(job.id, JobStatus.RUNNING, pid=pid)
+                finally:
+                    self._condition.notify_all()
 
         def on_output(line: str) -> None:
             self._write_log(job.id, redact(line))
@@ -262,13 +309,20 @@ class GpuJobScheduler:
         with self._condition:
             try:
                 if entry.cancel_requested and entry.handle is None:
-                    entry.cancel_exit_confirmed = True
+                    entry.cancel_attempt_done = True
+                    entry.exit_confirmed = True
                     self._condition.notify_all()
-                while entry.cancel_requested and not entry.cancel_exit_confirmed:
+                while entry.cancel_requested and not entry.cancel_attempt_done:
                     self._condition.wait()
-                if entry.cancel_requested or result.cancelled:
+                if entry.cancel_error is not None:
+                    status = JobStatus.FAILED
+                    fields = {
+                        "exit_code": result.exit_code,
+                        "error": redact(entry.cancel_error),
+                    }
+                elif entry.cancel_requested or result.cancelled:
                     status = JobStatus.CANCELLED
-                    fields: dict[str, Any] = {"exit_code": result.exit_code}
+                    fields = {"exit_code": result.exit_code}
                 elif result.exit_code == 0 and result.error is None:
                     status = JobStatus.SUCCEEDED
                     fields = {"exit_code": result.exit_code}
@@ -279,11 +333,100 @@ class GpuJobScheduler:
                         or f"Process exited with code {result.exit_code}"
                     )
                     fields = {"exit_code": result.exit_code, "error": error}
-                self._store.update_status(job.id, status, **fields)
+                self._persist_terminal_status_locked(
+                    entry, status, fields, api_key or ""
+                )
             finally:
-                self._secrets.delete(job.id)
-                entry.state = "terminal"
+                self._finish_entry_locked(entry, api_key or "")
+
+    def _persist_terminal_status_locked(
+        self,
+        entry: _JobEntry,
+        status: JobStatus,
+        fields: dict[str, Any],
+        api_key: str,
+    ) -> bool:
+        last_error: Exception | None = None
+        for _attempt in range(3):
+            try:
+                self._store.update_status(entry.job.id, status, **fields)
+                return True
+            except Exception as exc:
+                last_error = exc
+                try:
+                    record = self._store.get(entry.job.id)
+                except Exception as read_exc:
+                    last_error = read_exc
+                else:
+                    if record is not None and record.status is status:
+                        return True
+
+        assert last_error is not None
+        message = self._format_error(
+            f"Failed to persist terminal status {status.value} after 3 attempts",
+            last_error,
+            api_key,
+        )
+        self._health_errors[self._health_key(entry)] = message
+        return False
+
+    def _finish_entry_locked(self, entry: _JobEntry, api_key: str) -> None:
+        try:
+            self._secrets.delete(entry.job.id)
+        except Exception as exc:
+            self._health_errors[self._health_key(entry)] = self._format_error(
+                "Failed to clear job secret", exc, api_key
+            )
+        finally:
+            entry.state = "terminal"
+            self._condition.notify_all()
+
+    def _recover_worker_failure(
+        self,
+        worker: _GpuWorker,
+        queued_item: object,
+        entry: _JobEntry | None,
+        exc: Exception,
+    ) -> None:
+        if queued_item is _STOP:
+            return
+        job_id = str(queued_item)
+        api_key = self._secrets.get(job_id) or ""
+        with self._condition:
+            if entry is None:
+                entry = self._entries.get(job_id)
+            if entry is None:
+                self._health_errors[f"{worker.gpu_id}/{job_id}"] = self._format_error(
+                    "GPU worker item failed", exc, api_key
+                )
+                self._secrets.delete(job_id)
                 self._condition.notify_all()
+                return
+            if entry.state == "terminal":
+                return
+            try:
+                self._persist_terminal_status_locked(
+                    entry,
+                    JobStatus.FAILED,
+                    {
+                        "exit_code": -1,
+                        "error": self._format_error(
+                            "GPU worker item failed", exc, api_key
+                        ),
+                    },
+                    api_key,
+                )
+            finally:
+                self._finish_entry_locked(entry, api_key)
+
+    @staticmethod
+    def _health_key(entry: _JobEntry) -> str:
+        return f"{entry.job.gpu_id}/{entry.job.id}"
+
+    @staticmethod
+    def _format_error(prefix: str, exc: Exception, api_key: str) -> str:
+        detail = f"{type(exc).__name__}: {exc}"
+        return redact_secret(f"{prefix}: {detail}", api_key)
 
     def _write_log(self, job_id: str, line: str) -> None:
         if self._log_callback is not None:
