@@ -50,8 +50,11 @@ class CapturingRunner:
         callbacks.on_output(f"authenticated with {api_key}")
         callbacks.on_progress(1, 1, f"complete {api_key}")
         output = Path(job.output_dir)
-        output.mkdir(parents=True, exist_ok=True)
-        (output / "result.txt").write_text("safe extracted result", encoding="utf-8")
+        material = output / "modules" / "PDF" / "结果"
+        material.mkdir(parents=True, exist_ok=True)
+        (material / "material.md").write_text(
+            "safe extracted result", encoding="utf-8"
+        )
         return RunResult(exit_code=0, cancelled=False, error=None)
 
 

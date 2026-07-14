@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -23,6 +25,20 @@ _WINDOWS_DEVICE_NAMES = frozenset(
     | {f"COM{number}" for number in range(1, 10)}
     | {f"LPT{number}" for number in range(1, 10)}
 )
+_MATERIAL_IMAGE_EXTENSIONS = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+)
+_LOGICAL_PATH_KEYS = frozenset(
+    {"section_path", "material_path", "rule_section_path"}
+)
+
+
+def _normalized_logical_root(value: str) -> str:
+    return " / ".join(
+        component.strip()
+        for component in str(value or "").split(" / ")
+        if component.strip()
+    )
 
 
 class OutputFile(BaseModel):
@@ -123,6 +139,52 @@ class JobFiles:
                 temporary_path.unlink(missing_ok=True)
             return target
 
+    def material_archive(
+        self,
+        job_id: str,
+        output_root: Path,
+        archive_root: Path,
+        *,
+        strip_components: int,
+        logical_root: str,
+    ) -> Path:
+        """Build a portable ``history/`` package containing reuse materials only."""
+        if not _SAFE_JOB_ID.fullmatch(job_id) or self._is_windows_device_name(job_id):
+            raise ValueError("unsafe job id")
+        if (
+            not isinstance(strip_components, int)
+            or isinstance(strip_components, bool)
+            or strip_components < 0
+        ):
+            raise ValueError("strip_components must be a non-negative integer")
+
+        archive_directory = Path(archive_root)
+        archive_directory.mkdir(parents=True, exist_ok=True)
+        archive_directory = archive_directory.resolve(strict=True)
+        target = archive_directory / f"{job_id}.materials-v1.zip"
+        lock_id = f"{job_id}.materials-v1"
+        with self._archive_lock(archive_directory, lock_id):
+            if target.is_file() and not target.is_symlink():
+                return target
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{job_id}.materials-v1.",
+                suffix=".tmp",
+                dir=archive_directory,
+            )
+            os.close(descriptor)
+            temporary_path = Path(temporary_name)
+            try:
+                self._write_material_archive(
+                    Path(output_root) / "modules",
+                    temporary_path,
+                    strip_components=strip_components,
+                    logical_root=logical_root,
+                )
+                os.replace(temporary_path, target)
+            finally:
+                temporary_path.unlink(missing_ok=True)
+            return target
+
     @contextmanager
     def _archive_lock(self, archive_root: Path, job_id: str) -> Iterator[None]:
         key = (archive_root, job_id)
@@ -161,6 +223,188 @@ class JobFiles:
                     continue
                 with source, bundle.open(relative_path, mode="w") as destination:
                     shutil.copyfileobj(source, destination, length=1024 * 1024)
+
+    def _write_material_archive(
+        self,
+        modules_root: Path,
+        temporary_path: Path,
+        *,
+        strip_components: int,
+        logical_root: str,
+    ) -> None:
+        entries = self._material_archive_entries(
+            modules_root,
+            strip_components=strip_components,
+        )
+        modules_absolute = Path(modules_root).resolve(strict=True)
+        path_map: dict[str, str] = {}
+        for source_relative, archive_relative in entries:
+            absolute = modules_absolute.joinpath(*PurePosixPath(source_relative).parts)
+            for source_text in (
+                str(absolute),
+                absolute.as_posix(),
+                source_relative,
+                f"modules/{source_relative}",
+            ):
+                path_map[source_text] = archive_relative
+
+        with zipfile.ZipFile(
+            temporary_path, mode="w", compression=zipfile.ZIP_DEFLATED
+        ) as bundle:
+            for source_relative, archive_relative in entries:
+                try:
+                    source = self.open_file(modules_root, source_relative)
+                except OSError:
+                    continue
+                source_parts = PurePosixPath(source_relative).parts
+                with source:
+                    if source_parts[-1] == "material.md":
+                        markdown = source.read().decode("utf-8", errors="replace")
+                        markdown = self._rewrite_markdown_paths(
+                            markdown,
+                            archive_relative=archive_relative,
+                            path_map=path_map,
+                        )
+                        bundle.writestr(archive_relative, markdown.encode("utf-8"))
+                    elif source_parts[-2] == "table_items":
+                        payload = json.loads(source.read().decode("utf-8"))
+                        payload = self._rewrite_json_paths(
+                            payload,
+                            path_map=path_map,
+                            strip_components=strip_components,
+                            logical_root=logical_root,
+                        )
+                        bundle.writestr(
+                            archive_relative,
+                            json.dumps(payload, ensure_ascii=False, indent=2).encode(
+                                "utf-8"
+                            ),
+                        )
+                    else:
+                        with bundle.open(archive_relative, mode="w") as destination:
+                            shutil.copyfileobj(
+                                source, destination, length=1024 * 1024
+                            )
+
+    @classmethod
+    def _material_archive_entries(
+        cls,
+        modules_root: Path,
+        *,
+        strip_components: int,
+    ) -> list[tuple[str, str]]:
+        candidates: list[tuple[str, tuple[str, ...]]] = []
+        prefixes: set[tuple[str, ...]] = set()
+        for relative_path, _file_path in cls._iter_safe_files(modules_root):
+            parts = PurePosixPath(relative_path).parts
+            if not cls._is_material_package_file(parts):
+                continue
+            if len(parts) <= strip_components:
+                continue
+            prefix = parts[:strip_components]
+            remaining = parts[strip_components:]
+            minimum_parts = 2 if remaining[-1] == "material.md" else 3
+            if len(remaining) < minimum_parts:
+                continue
+            prefixes.add(prefix)
+            candidates.append((relative_path, remaining))
+
+        if not candidates:
+            raise ValueError("No reusable material files were produced")
+        if len(prefixes) != 1:
+            raise ValueError("Material files do not share one configured path root")
+        return sorted(
+            (
+                source_relative,
+                PurePosixPath("history", *remaining).as_posix(),
+            )
+            for source_relative, remaining in candidates
+        )
+
+    @staticmethod
+    def _is_material_package_file(parts: tuple[str, ...]) -> bool:
+        if not parts:
+            return False
+        if parts[-1] == "material.md":
+            return True
+        if len(parts) < 2:
+            return False
+        suffix = PurePosixPath(parts[-1]).suffix.lower()
+        if parts[-2] == "image_items":
+            return suffix in _MATERIAL_IMAGE_EXTENSIONS
+        if parts[-2] == "table_items":
+            return suffix == ".json"
+        return False
+
+    @staticmethod
+    def _rewrite_markdown_paths(
+        markdown: str,
+        *,
+        archive_relative: str,
+        path_map: dict[str, str],
+    ) -> str:
+        rewritten = markdown
+        markdown_parent = PurePosixPath(archive_relative).parent.as_posix()
+        replacements: list[tuple[str, str]] = []
+        for source, target in path_map.items():
+            relative_target = posixpath.relpath(target, markdown_parent)
+            replacements.append((source, relative_target))
+        for source, target in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+            rewritten = rewritten.replace(source, target)
+            rewritten = rewritten.replace(source.replace("/", "\\"), target)
+        return rewritten
+
+    @classmethod
+    def _rewrite_json_paths(
+        cls,
+        value: object,
+        *,
+        path_map: dict[str, str],
+        strip_components: int,
+        logical_root: str,
+        key: str = "",
+    ) -> object:
+        if isinstance(value, dict):
+            return {
+                item_key: cls._rewrite_json_paths(
+                    item_value,
+                    path_map=path_map,
+                    strip_components=strip_components,
+                    logical_root=logical_root,
+                    key=str(item_key),
+                )
+                for item_key, item_value in value.items()
+            }
+        if isinstance(value, list):
+            if key == "folder_parts":
+                return value[strip_components:]
+            return [
+                cls._rewrite_json_paths(
+                    item,
+                    path_map=path_map,
+                    strip_components=strip_components,
+                    logical_root=logical_root,
+                    key=key,
+                )
+                for item in value
+            ]
+        if not isinstance(value, str):
+            return value
+
+        normalized = value.replace("\\", "/")
+        for source, target in sorted(path_map.items(), key=lambda item: len(item[0]), reverse=True):
+            if normalized == source.replace("\\", "/"):
+                return target
+        if key == "source_file" and (Path(value).is_absolute() or "/" in normalized):
+            return PurePosixPath(normalized).name
+        root = _normalized_logical_root(logical_root)
+        if key in _LOGICAL_PATH_KEYS and root:
+            if value == root:
+                return ""
+            prefix = f"{root} / "
+            if value.startswith(prefix):
+                return value[len(prefix) :]
+        return value
 
     @classmethod
     def _iter_safe_files(cls, output_root: Path) -> Iterator[tuple[str, Path]]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 import zipfile
@@ -337,3 +338,90 @@ def test_completed_archive_locks_are_released_from_registry(tmp_path) -> None:
         job_files.archive(f"job-{index}", output_root, archive_root)
 
     assert job_files._archive_locks == {}
+
+
+def test_material_archive_matches_history_layout_and_filters_intermediates(
+    tmp_path,
+) -> None:
+    output_root = tmp_path / "output"
+    material = output_root / "modules" / "PDF" / "3、 补充文件" / "3.3、 投标人基本情况表"
+    leaf = material / "3.3.2、 投标人基本情况表2"
+    (leaf / "image_items").mkdir(parents=True)
+    (leaf / "table_items").mkdir()
+    image_path = leaf / "image_items" / "证书.jpeg"
+    table_path = leaf / "table_items" / "表1.json"
+    (leaf / "material.md").write_text(
+        f"# 投标人基本情况表2\n\n![证书]({image_path})\n", encoding="utf-8"
+    )
+    image_path.write_bytes(b"image")
+    (leaf / "image_items" / "证书.json").write_text("{\"meta\": true}")
+    table_path.write_text(
+        json.dumps(
+            {
+                "rows": [],
+                "section_path": "PDF / 3、 补充文件 / 3.3、 投标人基本情况表 / 3.3.2、 投标人基本情况表2",
+                "folder_parts": ["PDF", "3、 补充文件", "3.3、 投标人基本情况表", "3.3.2、 投标人基本情况表2"],
+                "json_path": str(table_path),
+                "source_file": "/srv/uploads/input.pdf",
+                "table_model": {"cells": [{"image_ref": str(image_path)}]},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (leaf / "ordered_material.json").write_text("{}")
+    (output_root / "modules" / "PDF" / "material.md").write_text("root navigation")
+    (output_root / "modules" / "商务文件" / "module_meta.json").parent.mkdir(parents=True)
+    (output_root / "modules" / "商务文件" / "module_meta.json").write_text("{}")
+    (output_root / "parsed").mkdir()
+    (output_root / "parsed" / "tables.json").write_text("{}")
+
+    archive = JobFiles().material_archive(
+        "job-1",
+        output_root,
+        tmp_path / "archives",
+        strip_components=1,
+        logical_root="PDF",
+    )
+
+    assert archive.name == "job-1.materials-v1.zip"
+    with zipfile.ZipFile(archive) as bundle:
+        assert bundle.namelist() == [
+            "history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/image_items/证书.jpeg",
+            "history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/material.md",
+            "history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/table_items/表1.json",
+        ]
+        markdown = bundle.read(bundle.namelist()[1]).decode()
+        assert markdown == "# 投标人基本情况表2\n\n![证书](image_items/证书.jpeg)\n"
+        table = json.loads(bundle.read(bundle.namelist()[2]))
+        assert table["section_path"] == "3、 补充文件 / 3.3、 投标人基本情况表 / 3.3.2、 投标人基本情况表2"
+        assert table["folder_parts"] == ["3、 补充文件", "3.3、 投标人基本情况表", "3.3.2、 投标人基本情况表2"]
+        assert table["json_path"].startswith("history/3、 补充文件/")
+        assert table["source_file"] == "input.pdf"
+        assert table["table_model"]["cells"][0]["image_ref"].endswith("image_items/证书.jpeg")
+
+
+def test_material_archive_rejects_mismatched_or_symlinked_roots(tmp_path) -> None:
+    output_root = tmp_path / "output"
+    modules = output_root / "modules"
+    first = modules / "PDF" / "一"
+    second = modules / "OTHER" / "二"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "material.md").write_text("one")
+    (second / "material.md").write_text("two")
+    with pytest.raises(ValueError, match="path root"):
+        JobFiles().material_archive(
+            "job-2", output_root, tmp_path / "archives", strip_components=1, logical_root="PDF"
+        )
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "material.md").write_text("secret")
+    safe_output = tmp_path / "safe-output"
+    safe_output.mkdir()
+    (safe_output / "modules").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        JobFiles().material_archive(
+            "job-3", safe_output, tmp_path / "archives", strip_components=1, logical_root="PDF"
+        )

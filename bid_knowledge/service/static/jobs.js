@@ -82,11 +82,6 @@
     await loadDetail(jobId);
   }
 
-  function fileUrl(jobId, path) {
-    const safePath = path.split("/").map(encodeURIComponent).join("/");
-    return `/api/jobs/${encodeURIComponent(jobId)}/files/${safePath}`;
-  }
-
   async function loadDetail(jobId) {
     const job = await request(`/api/jobs/${encodeURIComponent(jobId)}`);
     detail.className = "job-detail";
@@ -106,21 +101,10 @@
     log.className = "job-log";
     log.textContent = (job.logs || []).join("\n") || "暂无日志";
     detail.appendChild(log);
-    if (job.status === "succeeded") await renderFiles(job);
+    if (job.status === "succeeded") renderDownloads(job);
   }
 
-  async function renderFiles(job) {
-    const files = (await request(`/api/jobs/${encodeURIComponent(job.id)}/files`)).files;
-    const list = document.createElement("ul");
-    list.className = "job-files";
-    for (const file of files) {
-      const item = document.createElement("li");
-      const link = document.createElement("a");
-      link.href = fileUrl(job.id, file.path);
-      link.textContent = `${file.path} (${file.size_bytes} bytes)`;
-      item.appendChild(link);
-      list.appendChild(item);
-    }
+  function renderDownloads(job) {
     const archive = document.createElement("a");
     archive.href = `/api/jobs/${encodeURIComponent(job.id)}/archive`;
     archive.textContent = "下载完整 ZIP";
@@ -133,7 +117,7 @@
       runSelect.dispatchEvent(new Event("change"));
       document.querySelector(".app").scrollIntoView({ behavior: "smooth" });
     });
-    detail.append(list, archive, document.createTextNode(" "), browse);
+    detail.append(archive, document.createTextNode(" "), browse);
   }
 
   async function cancelJob(jobId) {
