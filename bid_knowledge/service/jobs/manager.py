@@ -22,6 +22,7 @@ _DEFAULT_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 _DEFAULT_MAX_VLM_WORKERS = 128
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 _LOG_READ_BLOCK_BYTES = 8192
+_LOG_TAIL_MAX_BYTES = 1024 * 1024
 
 
 class JobManagerError(RuntimeError):
@@ -537,18 +538,31 @@ class JobManager:
                 remaining = log.tell()
                 chunks: list[bytes] = []
                 newline_count = 0
-                while remaining > 0 and newline_count <= limit:
-                    size = min(_LOG_READ_BLOCK_BYTES, remaining)
+                bytes_read = 0
+                while (
+                    remaining > 0
+                    and newline_count <= limit
+                    and bytes_read < _LOG_TAIL_MAX_BYTES
+                ):
+                    size = min(
+                        _LOG_READ_BLOCK_BYTES,
+                        remaining,
+                        _LOG_TAIL_MAX_BYTES - bytes_read,
+                    )
                     remaining -= size
                     log.seek(remaining)
                     chunk = log.read(size)
                     chunks.append(chunk)
+                    bytes_read += len(chunk)
                     newline_count += chunk.count(b"\n")
                 text = b"".join(reversed(chunks)).decode(
                     "utf-8", errors="replace"
                 )
                 lines = text.splitlines()[-limit:]
-                return [self._secrets.redact(job_id, line) for line in lines]
+                redacted = [self._secrets.redact(job_id, line) for line in lines]
+                if remaining > 0 and bytes_read >= _LOG_TAIL_MAX_BYTES:
+                    redacted.insert(0, "[log truncated]")
+                return redacted
         except FileNotFoundError:
             return []
 

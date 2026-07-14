@@ -353,6 +353,55 @@ def test_tail_log_reads_a_bounded_suffix_and_list_jobs_skips_logs(
         manager.get_job(view.id)
 
 
+def test_tail_log_caps_bytes_for_a_multi_megabyte_single_line(
+    manager_parts, monkeypatch
+) -> None:
+    manager, _, _, _, secrets, _, tmp_path = manager_parts
+    view = create(manager)
+    log = tmp_path / "service_data/logs" / f"{view.id}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_bytes(b"x" * (3 * 1024 * 1024) + b"key")
+    original_open = Path.open
+    bytes_read = 0
+
+    class ReadSpy:
+        def __init__(self, wrapped) -> None:
+            self._wrapped = wrapped
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._wrapped.__exit__(*args)
+
+        def seek(self, *args):
+            return self._wrapped.seek(*args)
+
+        def tell(self):
+            return self._wrapped.tell()
+
+        def read(self, size=-1):
+            nonlocal bytes_read
+            data = self._wrapped.read(size)
+            bytes_read += len(data)
+            return data
+
+    def tracking_open(path, *args, **kwargs):
+        opened = original_open(path, *args, **kwargs)
+        if path == log:
+            return ReadSpy(opened)
+        return opened
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    lines = manager.tail_log(view.id)
+
+    assert bytes_read <= 1024 * 1024
+    assert lines[0] == "[log truncated]"
+    assert lines[-1].endswith("[REDACTED]")
+    assert "key" not in "\n".join(lines)
+
+
 def test_files_open_is_delegated_and_archive_requires_success(manager_parts) -> None:
     manager, store, _, _, _, files, tmp_path = manager_parts
     view = create(manager)
