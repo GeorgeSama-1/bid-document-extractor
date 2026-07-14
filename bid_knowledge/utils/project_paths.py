@@ -9,17 +9,8 @@ def project_root() -> Path:
     if env_root:
         return Path(env_root).expanduser().resolve()
 
-    candidates = [Path.cwd().resolve(), *Path(__file__).resolve().parents]
-    for candidate in candidates:
-        if (candidate / "bid-document-extractor").is_dir() and (
-            (candidate / "data").is_dir() or (candidate / "outputs").is_dir()
-        ):
-            return candidate
-
     code_root = Path(__file__).resolve().parents[2]
-    if code_root.name == "bid-document-extractor":
-        return code_root.parent.resolve()
-    return Path.cwd().resolve()
+    return code_root.parent.resolve()
 
 
 def data_dir() -> Path:
