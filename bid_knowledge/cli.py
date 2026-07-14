@@ -46,6 +46,13 @@ from bid_knowledge.schemas.models import (
     SectionMatchResult,
 )
 from bid_knowledge.utils.io_utils import ensure_dir, read_json, write_json
+from bid_knowledge.utils.project_paths import (
+    resolve_config_path,
+    resolve_data_path,
+    resolve_input_path,
+    resolve_output_path,
+    resolve_raw_input_path,
+)
 
 
 app = typer.Typer(help="Bid knowledge pre-ingestion parsing and retrieval validation MVP.")
@@ -118,37 +125,37 @@ def _parse_bool_flag(value: str | bool) -> bool:
 
 
 def _load_plan(path: str | Path) -> ProcessingPlan:
-    return ProcessingPlan(**read_json(path))
+    return ProcessingPlan(**read_json(resolve_input_path(path)))
 
 
 def _load_blocks(path: str | Path) -> list[PdfTextBlock]:
-    return [PdfTextBlock(**item) for item in read_json(path)]
+    return [PdfTextBlock(**item) for item in read_json(resolve_input_path(path))]
 
 
 def _load_tables(path: str | Path) -> list[ParsedTable]:
-    return [ParsedTable(**item) for item in read_json(path)]
+    return [ParsedTable(**item) for item in read_json(resolve_input_path(path))]
 
 
 def _load_ocr(path: str | Path) -> list[OCRResult]:
-    return [OCRResult(**item) for item in read_json(path)]
+    return [OCRResult(**item) for item in read_json(resolve_input_path(path))]
 
 
 def _load_sections(path: str | Path) -> list[ReconstructedSection]:
-    return [ReconstructedSection(**item) for item in read_json(path)]
+    return [ReconstructedSection(**item) for item in read_json(resolve_input_path(path))]
 
 
 def _load_matches(path: str | Path) -> list[SectionMatchResult]:
-    return [SectionMatchResult(**item) for item in read_json(path)]
+    return [SectionMatchResult(**item) for item in read_json(resolve_input_path(path))]
 
 
 def _load_candidates(path: str | Path) -> list[ReusableCandidate]:
-    return [ReusableCandidate(**item) for item in read_json(path)]
+    return [ReusableCandidate(**item) for item in read_json(resolve_input_path(path))]
 
 
 def _load_images(path: str | Path | None) -> list[dict]:
     if not path:
         return []
-    return list(read_json(path))
+    return list(read_json(resolve_input_path(path)))
 
 
 def _build_page_material_stream_payload(
@@ -220,8 +227,13 @@ def load_rules_command(
     out: str = typer.Option(..., "--out"),
     report: str = typer.Option(..., "--report"),
 ) -> None:
-    rules, final_report = load_rules_from_excel(rules_xlsx, out_path=out, report_path=report)
-    typer.echo(f"Loaded {len(rules)} rules from {rules_xlsx}")
+    rules_path = resolve_raw_input_path(rules_xlsx)
+    rules, final_report = load_rules_from_excel(
+        rules_path,
+        out_path=resolve_output_path(out),
+        report_path=resolve_output_path(report),
+    )
+    typer.echo(f"Loaded {len(rules)} rules from {rules_path}")
     typer.echo(json.dumps(final_report, ensure_ascii=False, indent=2))
 
 
@@ -231,10 +243,11 @@ def build_plan_command(
     manual_config: Optional[str] = typer.Option(None, "--manual-config"),
     out: str = typer.Option(..., "--out"),
 ) -> None:
-    rule_models = load_rules_from_json(rules)
-    manual = load_manual_config(manual_config)
-    plan = build_processing_plan(rule_models, manual, out_path=out)
-    typer.echo(f"Built processing plan with {len(plan.sections)} sections -> {out}")
+    rule_models = load_rules_from_json(resolve_input_path(rules))
+    manual = load_manual_config(resolve_config_path(manual_config))
+    out_path = resolve_output_path(out)
+    plan = build_processing_plan(rule_models, manual, out_path=out_path)
+    typer.echo(f"Built processing plan with {len(plan.sections)} sections -> {out_path}")
 
 
 @app.command("parse-pdf")
@@ -244,9 +257,11 @@ def parse_pdf_command(
     out_dir: str = typer.Option(..., "--out-dir"),
     progress: str = typer.Option("true", "--progress"),
 ) -> None:
+    pdf_path = resolve_raw_input_path(pdf)
+    out_path = resolve_output_path(out_dir)
     with _make_progress_callback(_parse_bool_flag(progress), "Parsing PDF pages") as progress_callback:
-        parse_pdf(pdf, plan=_load_plan(plan), out_dir=out_dir, progress_callback=progress_callback)
-    typer.echo(f"Parsed PDF -> {out_dir}")
+        parse_pdf(pdf_path, plan=_load_plan(plan), out_dir=out_path, progress_callback=progress_callback)
+    typer.echo(f"Parsed PDF -> {out_path}")
 
 
 @app.command("extract-tables")
@@ -256,9 +271,11 @@ def extract_tables_command(
     out: str = typer.Option(..., "--out"),
     progress: str = typer.Option("true", "--progress"),
 ) -> None:
+    pdf_path = resolve_raw_input_path(pdf)
+    out_path = resolve_output_path(out)
     with _make_progress_callback(_parse_bool_flag(progress), "Extracting tables") as progress_callback:
-        tables = extract_tables(pdf, plan=_load_plan(plan), out_path=out, progress_callback=progress_callback)
-    typer.echo(f"Extracted {len(tables)} tables -> {out}")
+        tables = extract_tables(pdf_path, plan=_load_plan(plan), out_path=out_path, progress_callback=progress_callback)
+    typer.echo(f"Extracted {len(tables)} tables -> {out_path}")
 
 
 @app.command("run-ocr")
@@ -272,19 +289,22 @@ def run_ocr_command(
     out: str = typer.Option(..., "--out"),
     progress: str = typer.Option("true", "--progress"),
 ) -> None:
+    pdf_path = resolve_raw_input_path(pdf)
+    parsed_path = resolve_output_path(parsed_dir)
+    out_path = resolve_output_path(out)
     processing_plan = _load_plan(plan)
     pages = _collect_ocr_pages_from_plan(processing_plan)
     if not pages:
-        write_json(out, [])
+        write_json(out_path, [])
         typer.echo("No explicit OCR pages were configured. Wrote empty OCR results.")
         return
 
-    page_images_dir = ensure_dir(Path(parsed_dir) / "page_images")
+    page_images_dir = ensure_dir(parsed_path / "page_images")
     page_images = []
     for page_no in pages:
         image_path = page_images_dir / f"page_{page_no:04d}.png"
         if not image_path.exists():
-            render_pdf_pages(pdf, [page_no], page_images_dir)
+            render_pdf_pages(pdf_path, [page_no], page_images_dir)
         if image_path.exists():
             page_images.append({"page_no": page_no, "image_path": str(image_path)})
 
@@ -294,10 +314,10 @@ def run_ocr_command(
             endpoint=ocr_endpoint,
             model=ocr_model,
             api_key=ocr_api_key,
-            out_path=out,
+            out_path=out_path,
             progress_callback=progress_callback,
         )
-    typer.echo(f"OCR finished for {len(results)} pages -> {out}")
+    typer.echo(f"OCR finished for {len(results)} pages -> {out_path}")
 
 
 @app.command("merge-ocr")
@@ -306,8 +326,9 @@ def merge_ocr_command(
     ocr: str = typer.Option(..., "--ocr"),
     out: str = typer.Option(..., "--out"),
 ) -> None:
-    merged = merge_ocr_results(_load_blocks(blocks), _load_ocr(ocr), out_path=out)
-    typer.echo(f"Merged OCR into {len(merged)} blocks -> {out}")
+    out_path = resolve_output_path(out)
+    merged = merge_ocr_results(_load_blocks(blocks), _load_ocr(ocr), out_path=out_path)
+    typer.echo(f"Merged OCR into {len(merged)} blocks -> {out_path}")
 
 
 @app.command("run-pp-structure")
@@ -320,17 +341,19 @@ def run_pp_structure_command(
     use_textline_orientation: str = typer.Option("false", "--use-textline-orientation"),
     progress: str = typer.Option("true", "--progress"),
 ) -> None:
+    input_resolved = resolve_raw_input_path(input_path)
+    out_path = resolve_output_path(out)
     with _make_progress_callback(_parse_bool_flag(progress), "Running PP-StructureV3") as progress_callback:
         results = run_pp_structure(
-            input_path,
-            out_path=out,
+            input_resolved,
+            out_path=out_path,
             device=device,
             use_doc_orientation_classify=_parse_bool_flag(use_doc_orientation_classify),
             use_doc_unwarping=_parse_bool_flag(use_doc_unwarping),
             use_textline_orientation=_parse_bool_flag(use_textline_orientation),
             progress_callback=progress_callback,
         )
-    typer.echo(f"PP-StructureV3 finished for {len(results)} pages -> {out}")
+    typer.echo(f"PP-StructureV3 finished for {len(results)} pages -> {out_path}")
 
 
 @app.command("build-sections")
@@ -340,13 +363,14 @@ def build_sections_command(
     rules: str = typer.Option(..., "--rules"),
     out: str = typer.Option(..., "--out"),
 ) -> None:
+    out_path = resolve_output_path(out)
     sections = build_sections(
         blocks=_load_blocks(blocks),
-        toc=read_json(toc),
-        rules=load_rules_from_json(rules),
-        out_path=out,
+        toc=read_json(resolve_input_path(toc)),
+        rules=load_rules_from_json(resolve_input_path(rules)),
+        out_path=out_path,
     )
-    typer.echo(f"Built {len(sections)} sections -> {out}")
+    typer.echo(f"Built {len(sections)} sections -> {out_path}")
 
 
 @app.command("match-sections")
@@ -357,14 +381,15 @@ def match_sections_command(
     blocks: Optional[str] = typer.Option(None, "--blocks"),
     out: str = typer.Option(..., "--out"),
 ) -> None:
+    out_path = resolve_output_path(out)
     results = match_sections(
-        rules=load_rules_from_json(rules),
+        rules=load_rules_from_json(resolve_input_path(rules)),
         sections=_load_sections(sections),
         plan=_load_plan(plan),
         blocks=_load_blocks(blocks) if blocks else [],
-        out_path=out,
+        out_path=out_path,
     )
-    typer.echo(f"Matched {len(results)} rules -> {out}")
+    typer.echo(f"Matched {len(results)} rules -> {out_path}")
 
 
 @app.command("extract-candidates")
@@ -377,16 +402,18 @@ def extract_candidates_command(
     out_json: str = typer.Option(..., "--out-json"),
     out_csv: str = typer.Option(..., "--out-csv"),
 ) -> None:
+    out_json_path = resolve_output_path(out_json)
+    out_csv_path = resolve_output_path(out_csv)
     candidates = extract_candidates(
         plan=_load_plan(plan),
         matches=_load_matches(matches),
         blocks=_load_blocks(blocks),
         tables=_load_tables(tables),
         images=_load_images(images),
-        out_json=out_json,
-        out_csv=out_csv,
+        out_json=out_json_path,
+        out_csv=out_csv_path,
     )
-    typer.echo(f"Extracted {len(candidates)} candidates -> {out_json}")
+    typer.echo(f"Extracted {len(candidates)} candidates -> {out_json_path}")
 
 
 @app.command("package-materials")
@@ -401,19 +428,20 @@ def package_materials_command(
     manual_config: Optional[str] = typer.Option(None, "--manual-config"),
 ) -> None:
     plan_model = _load_plan(plan) if plan else None
-    manual = load_manual_config(manual_config) if manual_config else None
+    manual = load_manual_config(resolve_config_path(manual_config)) if manual_config else None
+    out_path = resolve_output_path(out_dir)
     manifest = package_module_artifacts(
         candidates=_load_candidates(candidates),
         blocks=_load_blocks(blocks),
         tables=_load_tables(tables),
         images=_load_images(images),
-        out_dir=out_dir,
-        pdf_path=pdf,
+        out_dir=out_path,
+        pdf_path=resolve_raw_input_path(pdf) if pdf else None,
         top_level_modules=_top_level_modules_from_plan(plan_model) if plan_model else None,
         planned_section_paths=_history_section_paths_from_plan(plan_model) if plan_model else None,
         compound_material_rules=manual.compound_material_rules if manual and manual.compound_material_rules else None,
     )
-    typer.echo(f"Packaged {len(manifest.get('sections', []))} sections -> {out_dir}")
+    typer.echo(f"Packaged {len(manifest.get('sections', []))} sections -> {out_path}")
 
 
 @app.command("pdf-toc-pipeline")
@@ -437,18 +465,19 @@ def pdf_toc_pipeline_command(
     progress: str = typer.Option("true", "--progress"),
 ) -> None:
     pipeline_started_at = time.perf_counter()
+    pdf_path = resolve_raw_input_path(pdf)
     pp_structure_enabled = _parse_bool_flag(enable_pp_structure)
     vlm_table_enabled = _parse_bool_flag(enable_vlm_table)
     show_progress = _parse_bool_flag(progress)
     total_steps = 7 if vlm_table_enabled else 6
-    root = ensure_dir(out_dir)
+    root = ensure_dir(resolve_output_path(out_dir))
     parsed_dir = ensure_dir(root / "parsed")
     candidates_dir = ensure_dir(root / "candidates")
     ensure_dir(root / "modules")
 
     _pipeline_echo(1, total_steps, "Parsing PDF text, images, and TOC")
     with _make_progress_callback(show_progress, "Parsing PDF pages") as progress_callback:
-        parsed = parse_pdf(pdf, plan=None, out_dir=parsed_dir, progress_callback=progress_callback)
+        parsed = parse_pdf(str(pdf_path), plan=None, out_dir=parsed_dir, progress_callback=progress_callback)
 
     toc = list(parsed.get("toc") or [])
     page_count = _document_page_count(parsed)
@@ -460,7 +489,7 @@ def pdf_toc_pipeline_command(
         _pipeline_echo(2, total_steps, "Running PP-StructureV3 for positioning")
         with _make_progress_callback(show_progress, "Running PP-StructureV3") as progress_callback:
             pp_structure_results = run_pp_structure(
-                pdf,
+                str(pdf_path),
                 out_path=parsed_dir / "pp_structure_results.json",
                 device=pp_structure_device,
                 use_doc_orientation_classify=_parse_bool_flag(pp_structure_use_doc_orientation_classify),
@@ -478,28 +507,28 @@ def pdf_toc_pipeline_command(
     if pp_structure_enabled:
         _pipeline_echo(3, total_steps, "Detecting table regions")
         with _make_progress_callback(show_progress, "Extracting PDF-native fallback tables") as progress_callback:
-            pdf_tables = extract_tables(pdf, plan=None, progress_callback=progress_callback)
+            pdf_tables = extract_tables(str(pdf_path), plan=None, progress_callback=progress_callback)
         pp_tables = extract_pp_structure_tables(pp_structure_results)
         source_tables = merge_pp_and_pdf_tables(pp_tables, pdf_tables)
         with _make_progress_callback(show_progress, "Detecting table regions") as progress_callback:
             table_regions = detect_candidate_table_regions(
-                pdf_path=pdf,
+                pdf_path=str(pdf_path),
                 pdf_tables=source_tables,
                 images=images,
                 pp_structure_results=pp_structure_results,
                 out_dir=parsed_dir / "table_regions",
                 progress_callback=progress_callback,
-            )
+        )
         table_groups = group_candidate_table_regions(table_regions, out_dir=parsed_dir / "table_regions")
-        tables = groups_to_parsed_tables(table_groups, source_tables, pdf_path=pdf)
+        tables = groups_to_parsed_tables(table_groups, source_tables, pdf_path=str(pdf_path))
         write_json(parsed_dir / "tables.json", tables)
     else:
         _pipeline_echo(3, total_steps, "Detecting PDF-native table regions")
         with _make_progress_callback(show_progress, "Extracting tables") as progress_callback:
-            source_tables = extract_tables(pdf, plan=None, progress_callback=progress_callback)
+            source_tables = extract_tables(str(pdf_path), plan=None, progress_callback=progress_callback)
         with _make_progress_callback(show_progress, "Detecting table regions") as progress_callback:
             table_regions = detect_candidate_table_regions(
-                pdf_path=pdf,
+                pdf_path=str(pdf_path),
                 pdf_tables=source_tables,
                 images=images,
                 pp_structure_results=[],
@@ -507,14 +536,14 @@ def pdf_toc_pipeline_command(
                 progress_callback=progress_callback,
             )
         table_groups = group_candidate_table_regions(table_regions, out_dir=parsed_dir / "table_regions")
-        tables = groups_to_parsed_tables(table_groups, source_tables, pdf_path=pdf)
+        tables = groups_to_parsed_tables(table_groups, source_tables, pdf_path=str(pdf_path))
         write_json(parsed_dir / "tables.json", tables)
 
     if vlm_table_enabled:
         _pipeline_echo(4, total_steps, "Enhancing tables with VLM")
         with _make_progress_callback(show_progress, "Enhancing tables with VLM") as progress_callback:
             tables = enhance_tables_with_vlm(
-                pdf_path=pdf,
+                pdf_path=str(pdf_path),
                 tables=tables,
                 images=images,
                 out_dir=parsed_dir / "vlm_tables",
@@ -538,11 +567,11 @@ def pdf_toc_pipeline_command(
         page_count=page_count,
         path_root=path_root,
         company_id="pdf",
-        document_id=Path(pdf).stem,
+        document_id=pdf_path.stem,
         blocks=blocks,
     )
     for candidate in candidates:
-        candidate.source_file = str(pdf)
+        candidate.source_file = str(pdf_path)
     write_json(candidates_dir / "toc_leaf_candidates.json", candidates)
     planned_paths = toc_leaf_section_paths(candidates)
     write_json(candidates_dir / "toc_leaf_section_paths.json", planned_paths)
@@ -563,7 +592,7 @@ def pdf_toc_pipeline_command(
         tables=tables,
         images=images,
         out_dir=root,
-        pdf_path=pdf,
+        pdf_path=str(pdf_path),
         top_level_modules=top_level_modules_from_toc_candidates(candidates),
         planned_section_paths=planned_paths,
         compound_material_rules=[],
@@ -581,8 +610,9 @@ def build_chunks_command(
     candidates: str = typer.Option(..., "--candidates"),
     out: str = typer.Option(..., "--out"),
 ) -> None:
-    chunks = build_chunks(_load_candidates(candidates), out_path=out)
-    typer.echo(f"Built {len(chunks)} chunks -> {out}")
+    out_path = resolve_output_path(out)
+    chunks = build_chunks(_load_candidates(candidates), out_path=out_path)
+    typer.echo(f"Built {len(chunks)} chunks -> {out_path}")
 
 
 @app.command("search")
@@ -592,7 +622,7 @@ def search_command(
     top_k: int = typer.Option(5, "--top-k"),
     method: str = typer.Option("bm25", "--method"),
 ) -> None:
-    chunk_models = load_chunks(chunks)
+    chunk_models = load_chunks(resolve_input_path(chunks))
     retriever = BM25Retriever(chunk_models) if method == "bm25" else VectorRetriever(chunk_models)
     results = retriever.search(query, top_k=top_k)
     typer.echo(json.dumps(results, ensure_ascii=False, indent=2))
@@ -606,7 +636,13 @@ def eval_retrieval_command(
     method: str = typer.Option("bm25", "--method"),
     top_k: int = typer.Option(5, "--top-k"),
 ) -> None:
-    report = evaluate_retrieval(chunks, queries, method=method, top_k=top_k, out_path=out)
+    report = evaluate_retrieval(
+        resolve_input_path(chunks),
+        resolve_input_path(queries),
+        method=method,
+        top_k=top_k,
+        out_path=resolve_output_path(out),
+    )
     typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
 
 
@@ -627,10 +663,13 @@ def pipeline_command(
     pp_structure_use_textline_orientation: str = typer.Option("false", "--pp-structure-use-textline-orientation"),
     progress: str = typer.Option("true", "--progress"),
 ) -> None:
+    rules_xlsx_path = resolve_raw_input_path(rules_xlsx)
+    pdf_path = resolve_raw_input_path(pdf)
+    manual_config_path = resolve_config_path(manual_config)
     pp_structure_enabled = _parse_bool_flag(enable_pp_structure)
     show_progress = _parse_bool_flag(progress)
     total_steps = 14 if pp_structure_enabled else 13
-    root = ensure_dir(out_dir)
+    root = ensure_dir(resolve_output_path(out_dir))
     rules_dir = ensure_dir(root / "rules")
     plan_dir = ensure_dir(root / "plan")
     parsed_dir = ensure_dir(root / "parsed")
@@ -642,21 +681,21 @@ def pipeline_command(
     rules_path = rules_dir / "section_rules.json"
     report_path = rules_dir / "rule_load_report.json"
     _pipeline_echo(1, total_steps, "Loading Excel rules")
-    rules, _ = load_rules_from_excel(rules_xlsx, out_path=rules_path, report_path=report_path)
+    rules, _ = load_rules_from_excel(rules_xlsx_path, out_path=rules_path, report_path=report_path)
 
     _pipeline_echo(2, total_steps, "Building processing plan")
-    manual = load_manual_config(manual_config)
+    manual = load_manual_config(manual_config_path)
     plan = build_processing_plan(rules, manual)
-    plan.source_file = str(Path(pdf))
+    plan.source_file = str(pdf_path)
     plan_path = plan_dir / "processing_plan.json"
     write_json(plan_path, plan)
 
     _pipeline_echo(3, total_steps, "Parsing PDF text, images, and TOC")
     with _make_progress_callback(show_progress, "Parsing PDF pages") as progress_callback:
-        parse_pdf(pdf, plan=plan, out_dir=parsed_dir, progress_callback=progress_callback)
+        parse_pdf(str(pdf_path), plan=plan, out_dir=parsed_dir, progress_callback=progress_callback)
     _pipeline_echo(4, total_steps, "Extracting tables")
     with _make_progress_callback(show_progress, "Extracting tables") as progress_callback:
-        tables = extract_tables(pdf, plan=plan, out_path=parsed_dir / "tables.json", progress_callback=progress_callback)
+        tables = extract_tables(str(pdf_path), plan=plan, out_path=parsed_dir / "tables.json", progress_callback=progress_callback)
 
     merged_blocks_path = parsed_dir / "text_blocks_merged.json"
     raw_blocks = merge_multiline_heading_blocks(_load_blocks(parsed_dir / "text_blocks.json"))
@@ -670,7 +709,7 @@ def pipeline_command(
         page_images_dir = ensure_dir(parsed_dir / "page_images")
         page_images = []
         if pages:
-            render_pdf_pages(pdf, pages, page_images_dir)
+            render_pdf_pages(str(pdf_path), pages, page_images_dir)
             page_images = [{"page_no": page, "image_path": str(page_images_dir / f"page_{page:04d}.png")} for page in pages]
         with _make_progress_callback(show_progress, "Running OCR") as progress_callback:
             ocr_results = run_ocr(
@@ -692,7 +731,7 @@ def pipeline_command(
         _pipeline_echo(6, total_steps, "Running PP-StructureV3")
         with _make_progress_callback(show_progress, "Running PP-StructureV3") as progress_callback:
             pp_structure_results = run_pp_structure(
-                pdf,
+                str(pdf_path),
                 out_path=parsed_dir / "pp_structure_results.json",
                 device=pp_structure_device,
                 use_doc_orientation_classify=_parse_bool_flag(pp_structure_use_doc_orientation_classify),
@@ -721,7 +760,7 @@ def pipeline_command(
     _pipeline_echo(8, total_steps, "Building reconstructed sections")
     sections = build_sections(
         blocks=merged_blocks,
-        toc=read_json(parsed_dir / "toc.json"),
+        toc=read_json(resolve_input_path(parsed_dir / "toc.json")),
         rules=rules,
         out_path=structure_dir / "reconstructed_sections.json",
     )
@@ -750,7 +789,7 @@ def pipeline_command(
         tables=tables,
         images=parsed_images,
         out_dir=root,
-        pdf_path=pdf,
+        pdf_path=str(pdf_path),
         top_level_modules=_top_level_modules_from_plan(plan),
         planned_section_paths=_history_section_paths_from_plan(plan),
         compound_material_rules=manual.compound_material_rules or None,
@@ -761,7 +800,7 @@ def pipeline_command(
     build_chunks(candidates, out_path=retrieval_dir / "chunks.jsonl")
 
     _pipeline_echo(13, total_steps, "Evaluating retrieval")
-    default_queries = Path("data/test_queries.json")
+    default_queries = resolve_data_path("test_queries.json")
     if default_queries.exists():
         evaluate_retrieval(
             retrieval_dir / "chunks.jsonl",

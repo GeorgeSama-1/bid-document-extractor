@@ -363,6 +363,80 @@ def test_pdf_toc_pipeline_enhances_tables_with_vlm_when_enabled(monkeypatch, tmp
     assert captured["tables"] == [enhanced_table]
 
 
+def test_pdf_toc_pipeline_resolves_root_data_pdf_and_root_outputs(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    workspace_root = tmp_path
+    raw_pdf = workspace_root / "data" / "raw" / "2、商务文件.pdf"
+    raw_pdf.parent.mkdir(parents=True)
+    raw_pdf.write_bytes(b"%PDF")
+    monkeypatch.setenv("BID_SOURCE_ROOT", str(workspace_root))
+    block = PdfTextBlock(block_id="block-1", page_no=1, text="1、测试章节", bbox=[10, 20, 200, 40], block_no=1)
+    candidate = cli.ReusableCandidate(
+        candidate_id="cand-1",
+        company_id="pdf",
+        document_id="2、商务文件",
+        rule_id="toc-1",
+        section_path="商务文件 / 1、测试章节",
+        title="1、测试章节",
+        content="",
+        candidate_type="attachment",
+        reuse_method="附件召回",
+        reuse_level="long_term",
+        enter_long_term_library=True,
+        source_file=str(raw_pdf),
+        source_page=1,
+        source_page_end=1,
+        source_container_title="1、测试章节",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_parse_pdf(pdf, *_, out_dir=None, **__):
+        captured["pdf"] = pdf
+        captured["parse_out_dir"] = Path(out_dir)
+        out = Path(out_dir)
+        write_json(out / "text_blocks.json", [block])
+        write_json(out / "images.json", [])
+        return {"toc": [{"title": "1、测试章节", "page": 1, "level": 1}], "document_meta": {"page_count": 1}}
+
+    def fake_package_module_artifacts(**kwargs):
+        captured["package_out_dir"] = Path(kwargs["out_dir"])
+        captured["package_pdf_path"] = kwargs["pdf_path"]
+        return {"sections": []}
+
+    monkeypatch.setattr(cli, "parse_pdf", fake_parse_pdf)
+    monkeypatch.setattr(cli, "run_pp_structure", lambda *_, **__: [])
+    monkeypatch.setattr(cli, "build_layout_masks", lambda *_: [])
+    monkeypatch.setattr(cli, "extract_tables", lambda *_, **__: [])
+    monkeypatch.setattr(cli, "detect_candidate_table_regions", lambda **_: [])
+    monkeypatch.setattr(cli, "group_candidate_table_regions", lambda regions, out_dir=None: [])
+    monkeypatch.setattr(cli, "groups_to_parsed_tables", lambda _groups, _source_tables, **_: [])
+    monkeypatch.setattr(cli, "build_toc_leaf_candidates", lambda **_: [candidate])
+    monkeypatch.setattr(cli, "toc_leaf_section_paths", lambda _: [candidate.section_path])
+    monkeypatch.setattr(cli, "top_level_modules_from_toc_candidates", lambda _: ["1、测试章节"])
+    monkeypatch.setattr(cli, "build_combined_page_material_stream", lambda **_: [])
+    monkeypatch.setattr(cli, "package_module_artifacts", fake_package_module_artifacts)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "pdf-toc-pipeline",
+            "--pdf",
+            "2、商务文件.pdf",
+            "--out-dir",
+            "outputs/pdf_toc_run_business_v11",
+            "--path-root",
+            "商务文件",
+        ],
+    )
+
+    expected_out = workspace_root / "outputs" / "pdf_toc_run_business_v11"
+    assert result.exit_code == 0, result.output
+    assert captured["pdf"] == str(raw_pdf)
+    assert captured["parse_out_dir"] == expected_out / "parsed"
+    assert captured["package_out_dir"] == expected_out
+    assert captured["package_pdf_path"] == str(raw_pdf)
+
+
 def test_pdf_toc_pipeline_writes_table_candidate_trace_before_packaging(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     block = PdfTextBlock(block_id="block-1", page_no=1, text="1、测试章节", bbox=[10, 20, 200, 40], block_no=1)

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from bid_knowledge.service.result_browser import ResultNotFoundError
+from bid_knowledge.utils.project_paths import default_project_config_path, outputs_dir as default_outputs_dir
 
 
 @dataclass(frozen=True)
@@ -171,11 +172,11 @@ class AgentMaterialContextService:
 class ProjectMaterialContextService:
     def __init__(
         self,
-        outputs_dir: Path | str = "outputs",
-        projects_config_path: Path | str = "configs/material_projects.json",
+        outputs_dir: Path | str | None = None,
+        projects_config_path: Path | str | None = None,
     ) -> None:
-        self.outputs_dir = Path(outputs_dir).resolve()
-        self.projects_config_path = Path(projects_config_path).resolve()
+        self.outputs_dir = Path(outputs_dir or default_outputs_dir()).resolve()
+        self.projects_config_path = Path(projects_config_path or default_project_config_path()).resolve()
         self.run_service = AgentMaterialContextService(self.outputs_dir)
 
     def get_project_context(

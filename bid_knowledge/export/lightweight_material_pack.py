@@ -13,7 +13,7 @@ TABLE_EXTENSIONS = {".json"}
 def _is_included_file(
     source_file: Path,
     source_root: Path,
-    excluded_roots: frozenset[str],
+    excluded_directories: frozenset[Path],
 ) -> bool:
     if source_file.is_symlink() or not source_file.is_file():
         return False
@@ -22,18 +22,21 @@ def _is_included_file(
         source_file.resolve(strict=True).relative_to(source_root.resolve(strict=True))
     except (FileNotFoundError, ValueError):
         return False
-    return not relative.parts or relative.parts[0] not in excluded_roots
+    return not any(
+        relative == excluded or excluded in relative.parents
+        for excluded in excluded_directories
+    )
 
 
 def _copy_material_files(
     source_root: Path,
     package_root: Path,
-    excluded_roots: frozenset[str],
+    excluded_directories: frozenset[Path],
     include_root_material_md: bool,
 ) -> int:
     copied_count = 0
     for material_md in source_root.rglob("material.md"):
-        if not _is_included_file(material_md, source_root, excluded_roots):
+        if not _is_included_file(material_md, source_root, excluded_directories):
             continue
         relative_path = material_md.relative_to(source_root)
         if not include_root_material_md and relative_path.parts == ("material.md",):
@@ -49,11 +52,11 @@ def _copy_named_files(
     source_root: Path,
     package_root: Path,
     filename: str,
-    excluded_roots: frozenset[str],
+    excluded_directories: frozenset[Path],
 ) -> int:
     copied_count = 0
     for source_file in source_root.rglob(filename):
-        if not _is_included_file(source_file, source_root, excluded_roots):
+        if not _is_included_file(source_file, source_root, excluded_directories):
             continue
         relative_path = source_file.relative_to(source_root)
         target_path = package_root / relative_path
@@ -66,7 +69,7 @@ def _copy_named_files(
 def _copy_image_items(
     source_root: Path,
     package_root: Path,
-    excluded_roots: frozenset[str],
+    excluded_directories: frozenset[Path],
 ) -> int:
     copied_count = 0
     for image_dir in source_root.rglob("image_items"):
@@ -74,7 +77,7 @@ def _copy_image_items(
             continue
         for image_file in image_dir.iterdir():
             if (
-                not _is_included_file(image_file, source_root, excluded_roots)
+                not _is_included_file(image_file, source_root, excluded_directories)
                 or image_file.suffix.lower() not in IMAGE_EXTENSIONS
             ):
                 continue
@@ -89,7 +92,7 @@ def _copy_image_items(
 def _copy_image_item_json(
     source_root: Path,
     package_root: Path,
-    excluded_roots: frozenset[str],
+    excluded_directories: frozenset[Path],
 ) -> int:
     copied_count = 0
     for image_dir in source_root.rglob("image_items"):
@@ -97,7 +100,7 @@ def _copy_image_item_json(
             continue
         for image_file in image_dir.iterdir():
             if (
-                not _is_included_file(image_file, source_root, excluded_roots)
+                not _is_included_file(image_file, source_root, excluded_directories)
                 or image_file.suffix.lower() != ".json"
             ):
                 continue
@@ -112,7 +115,7 @@ def _copy_image_item_json(
 def _copy_table_items(
     source_root: Path,
     package_root: Path,
-    excluded_roots: frozenset[str],
+    excluded_directories: frozenset[Path],
 ) -> int:
     copied_count = 0
     for table_dir in source_root.rglob("table_items"):
@@ -120,7 +123,7 @@ def _copy_table_items(
             continue
         for table_file in table_dir.iterdir():
             if (
-                not _is_included_file(table_file, source_root, excluded_roots)
+                not _is_included_file(table_file, source_root, excluded_directories)
                 or table_file.suffix.lower() not in TABLE_EXTENSIONS
             ):
                 continue
@@ -150,15 +153,13 @@ def _write_zip(package_root: Path, zip_path: Path) -> None:
                 archive.write(path, path.relative_to(package_root))
 
 
-def _auxiliary_module_roots(modules_dir: Path) -> frozenset[str]:
-    roots: set[str] = set()
+def _auxiliary_module_directories(modules_dir: Path) -> frozenset[Path]:
+    directories: set[Path] = set()
     for metadata in modules_dir.rglob("module_meta.json"):
         if not _is_included_file(metadata, modules_dir, frozenset()):
             continue
-        relative = metadata.relative_to(modules_dir)
-        if len(relative.parts) >= 2:
-            roots.add(relative.parts[0])
-    return frozenset(roots)
+        directories.add(metadata.parent.relative_to(modules_dir))
+    return frozenset(directories)
 
 
 def _rewrite_material_links(source_root: Path, package_content_root: Path) -> None:
@@ -228,8 +229,8 @@ def export_lightweight_material_pack(
     if relative_subdir.is_absolute() or ".." in relative_subdir.parts:
         raise ValueError("package_subdir must be a safe relative path")
     package_modules_dir = target_package_dir / relative_subdir
-    excluded_roots = (
-        _auxiliary_module_roots(modules_dir)
+    excluded_directories = (
+        _auxiliary_module_directories(modules_dir)
         if exclude_module_indexes
         else frozenset()
     )
@@ -237,24 +238,24 @@ def export_lightweight_material_pack(
         _copy_material_files(
             modules_dir,
             package_modules_dir,
-            excluded_roots,
+            excluded_directories,
             include_root_material_md,
         )
         if include_material_md
         else 0
     )
     image_count = (
-        _copy_image_items(modules_dir, package_modules_dir, excluded_roots)
+        _copy_image_items(modules_dir, package_modules_dir, excluded_directories)
         if include_images
         else 0
     )
     table_count = (
-        _copy_table_items(modules_dir, package_modules_dir, excluded_roots)
+        _copy_table_items(modules_dir, package_modules_dir, excluded_directories)
         if include_table_json
         else 0
     )
     image_json_count = (
-        _copy_image_item_json(modules_dir, package_modules_dir, excluded_roots)
+        _copy_image_item_json(modules_dir, package_modules_dir, excluded_directories)
         if include_image_json
         else 0
     )
@@ -263,7 +264,7 @@ def export_lightweight_material_pack(
             modules_dir,
             package_modules_dir,
             "ordered_material.json",
-            excluded_roots,
+            excluded_directories,
         )
         if include_ordered_material_json
         else 0

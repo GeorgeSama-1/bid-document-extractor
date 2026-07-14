@@ -6,10 +6,11 @@ from typing import Any
 
 from bid_knowledge.service.agent_material_context import AgentMaterialContextService, ProjectMaterialContextService
 from bid_knowledge.service.result_browser import ResultNotFoundError
+from bid_knowledge.utils.project_paths import default_project_config_path, outputs_dir
 
 
-DEFAULT_OUTPUTS_DIR = Path(os.environ.get("BID_MATERIAL_OUTPUTS_DIR", Path.cwd() / "outputs"))
-DEFAULT_PROJECTS_CONFIG = Path(os.environ.get("BID_MATERIAL_PROJECTS_CONFIG", Path.cwd() / "data" / "configs" / "material_projects.json"))
+DEFAULT_OUTPUTS_DIR = Path(os.environ.get("BID_MATERIAL_OUTPUTS_DIR", outputs_dir()))
+DEFAULT_PROJECTS_CONFIG = Path(os.environ.get("BID_MATERIAL_PROJECTS_CONFIG", default_project_config_path()))
 
 
 def get_material_context(

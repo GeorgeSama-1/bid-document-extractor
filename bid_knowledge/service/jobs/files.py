@@ -157,13 +157,13 @@ class JobFiles:
         archive_directory = Path(archive_root)
         archive_directory.mkdir(parents=True, exist_ok=True)
         archive_directory = archive_directory.resolve(strict=True)
-        target = archive_directory / f"{job_id}.materials-v3.zip"
-        lock_id = f"{job_id}.materials-v3"
+        target = archive_directory / f"{job_id}.materials-v4.zip"
+        lock_id = f"{job_id}.materials-v4"
         with self._archive_lock(archive_directory, lock_id):
             if target.is_file() and not target.is_symlink():
                 return target
             descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{job_id}.materials-v3.",
+                prefix=f".{job_id}.materials-v4.",
                 suffix=".tmp",
                 dir=archive_directory,
             )

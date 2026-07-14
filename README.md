@@ -80,6 +80,8 @@ sudo journalctl -u bid-document-extractor.service -f
 
 完整安装说明见 `deploy/SERVER_INSTALL.md`。不要增加 Uvicorn worker 数量，也不要复制 unit 启动第二实例；`service_data/service.lock` 会阻止多实例破坏进程内队列和密钥隔离。
 
+在 `/etc/bid-document-extractor.env` 中必须把 `BID_SOURCE_ROOT` 设置为仓库父目录，例如 `/bwopt/MODELS/hj/bid_source_v1`。服务把 `data/`、`outputs/` 和 `service_data/` 写在该目录下，仓库内部只保留代码。
+
 任务成功后，页面只提供轻量素材 ZIP 下载，不展示中间文件列表或单文件下载入口。Web 归档直接复用 `scripts/export_material_pack.py` 背后的 `export_lightweight_material_pack()`，收集全部章节的 `material.md` 和 `image_items` 图片，不包含 `table_items/*.json`、图片 JSON、`ordered_material.json`、解析缓存和日志。ZIP 使用上传 PDF 去掉扩展名后的名称作为父目录，例如：
 
 ```text
@@ -158,7 +160,7 @@ bid_source/
 
 ## 两条独立流水线
 
-以下命令默认在 `bid_source/` 根目录执行。代码在 `bid-document-extractor/` 下，但输入文件默认从根目录 `data/` 读取，输出默认写入根目录 `outputs/`。
+以下命令默认在 `bid-document-extractor/` 仓库目录执行，但输入文件默认从同级根目录的 `data/` 读取，输出默认写入同级根目录的 `outputs/`。也可以用 `BID_SOURCE_ROOT` 显式指定该根目录。
 
 ### Pipeline 1：PDF 目录驱动（推荐，不需要 Excel 规则）
 
@@ -534,7 +536,7 @@ python -m bid_knowledge.service.mcp_server
 命令行和 Web 服务共用 `export_lightweight_material_pack()`。命令行默认导出全部 `modules/**/material.md` 和 `image_items` 图片，默认不包含 `table_items/*.json`：
 
 ```bash
-python bid-document-extractor/scripts/export_material_pack.py \
+python scripts/export_material_pack.py \
   --output-dir outputs/pdf_toc_run_business_v11 \
   --package-dir /tmp/material_pack \
   --zip outputs/material_pack.zip \

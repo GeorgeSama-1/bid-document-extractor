@@ -425,7 +425,7 @@ def test_files_open_is_delegated_and_archive_requires_success(manager_parts) -> 
     material.mkdir(parents=True)
     (material / "material.md").write_text("# 补充文件", encoding="utf-8")
     archive = manager.archive(view.id)
-    assert archive == tmp_path / "service_data/archives" / f"{view.id}.materials-v3.zip"
+    assert archive == tmp_path / "service_data/archives" / f"{view.id}.materials-v4.zip"
     assert archive.is_file()
     with zipfile.ZipFile(archive) as bundle:
         assert bundle.namelist() == ["bid/history/3、 补充文件/material.md"]

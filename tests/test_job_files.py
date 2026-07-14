@@ -375,7 +375,7 @@ def test_material_archive_matches_history_layout_and_filters_intermediates(
         package_name="material.pdf",
     )
 
-    assert archive.name == "job-1.materials-v3.zip"
+    assert archive.name == "job-1.materials-v4.zip"
     with zipfile.ZipFile(archive) as bundle:
         assert bundle.namelist() == [
             "material/history/1、 商务偏差表/material.md",
@@ -403,3 +403,28 @@ def test_material_archive_rejects_symlinked_modules_root(tmp_path) -> None:
             tmp_path / "archives",
             package_name="material.pdf",
         )
+
+
+def test_material_archive_keeps_real_sections_beside_auxiliary_module_index(
+    tmp_path,
+) -> None:
+    output_root = tmp_path / "output"
+    real_section = output_root / "modules" / "商务文件" / "1、 商务偏差表"
+    real_section.mkdir(parents=True)
+    (real_section / "material.md").write_text("# 商务偏差表\n", encoding="utf-8")
+    auxiliary = output_root / "modules" / "商务文件" / "商务文件"
+    auxiliary.mkdir()
+    (auxiliary / "module_meta.json").write_text("{}", encoding="utf-8")
+    (auxiliary / "material.md").write_text("auxiliary", encoding="utf-8")
+
+    archive = JobFiles().material_archive(
+        "job-4",
+        output_root,
+        tmp_path / "archives",
+        package_name="material.pdf",
+    )
+
+    with zipfile.ZipFile(archive) as bundle:
+        assert bundle.namelist() == [
+            "material/history/商务文件/1、 商务偏差表/material.md"
+        ]

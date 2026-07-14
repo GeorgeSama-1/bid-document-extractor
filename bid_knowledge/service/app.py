@@ -31,10 +31,17 @@ from bid_knowledge.service.jobs.scheduler import GpuJobScheduler
 from bid_knowledge.service.jobs.secrets import SecretStore, redact_secret
 from bid_knowledge.service.jobs.store import JobStore
 from bid_knowledge.service.result_browser import ResultBrowser, ResultNotFoundError
-BASE_DIR = Path(__file__).resolve().parents[2]
+from bid_knowledge.utils.project_paths import (
+    default_project_config_path,
+    outputs_dir,
+    project_root,
+)
+
+
+BASE_DIR = project_root()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-OUTPUTS_DIR = BASE_DIR / "outputs"
-PROJECTS_CONFIG = BASE_DIR / "configs" / "material_projects.json"
+OUTPUTS_DIR = outputs_dir()
+PROJECTS_CONFIG = default_project_config_path()
 SERVICE_DATA_DIR = BASE_DIR / "service_data"
 
 browser = ResultBrowser(OUTPUTS_DIR)

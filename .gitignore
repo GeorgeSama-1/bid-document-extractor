@@ -21,6 +21,8 @@ htmlcov/
 
 # Output
 outputs/
+service_data/
+data/
 *.pyc
 
 # OS
