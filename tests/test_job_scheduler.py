@@ -113,14 +113,20 @@ class ControlledRunner:
         self.event_for(self.releases, job_id).set()
 
 
-def make_scheduler(tmp_path, runner, *, secrets=None, log_callback=None):
+def make_scheduler(
+    tmp_path, runner, *, secrets=None, log_callback=None, thread_factory=None
+):
     store = JobStore(tmp_path / "jobs.sqlite3")
     secrets = secrets or SecretStore()
+    scheduler_kwargs = {}
+    if thread_factory is not None:
+        scheduler_kwargs["thread_factory"] = thread_factory
     scheduler = GpuJobScheduler(
         store=store,
         secrets=secrets,
         runner=runner,
         log_callback=log_callback,
+        **scheduler_kwargs,
     )
     return store, secrets, scheduler
 
@@ -129,6 +135,48 @@ def persist_and_submit(store, secrets, scheduler, job, key=None) -> None:
     store.create(job)
     secrets.put(job.id, key if key is not None else f"key-{job.id}")
     scheduler.submit(job)
+
+
+def test_new_worker_start_failure_is_atomic_and_retryable(tmp_path) -> None:
+    runner = ControlledRunner()
+    failed_workers = []
+    factory_calls = 0
+
+    class StartFailureThread:
+        def start(self) -> None:
+            raise RuntimeError("thread start failed")
+
+    def thread_factory(**kwargs):
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            failed_workers.append(kwargs["args"][0])
+            return StartFailureThread()
+        return threading.Thread(**kwargs)
+
+    store, secrets, scheduler = make_scheduler(
+        tmp_path, runner, thread_factory=thread_factory
+    )
+    job = make_job(tmp_path, "retry")
+    store.create(job)
+    secrets.put(job.id, "key-retry")
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        scheduler.submit(job)
+
+    failed_worker = failed_workers[0]
+    assert scheduler.queue_position(job.id) is None
+    assert scheduler.cancel(job.id) is False
+    assert scheduler._entries == {}
+    assert scheduler._workers == {}
+    assert failed_worker.pending == []
+    assert failed_worker.queue.empty()
+    assert not runner.event_for(runner.started, job.id).is_set()
+
+    scheduler.submit(job)
+    runner.wait_started(job.id)
+    wait_until(lambda: store.get(job.id).status is JobStatus.SUCCEEDED)
+    scheduler.shutdown()
 
 
 def test_same_gpu_runs_fifo_without_overlap(tmp_path) -> None:

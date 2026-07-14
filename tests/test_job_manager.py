@@ -10,6 +10,7 @@ from bid_knowledge.service.jobs.gpu import GpuInfo, GpuInventoryError
 from bid_knowledge.service.jobs.manager import (
     JobConflictError,
     JobManager,
+    JobManagerError,
     JobNotFoundError,
     JobValidationError,
 )
@@ -298,6 +299,60 @@ def test_tail_log_is_limited_and_view_includes_log_tail(manager_parts) -> None:
         manager.tail_log(view.id, limit=-1)
 
 
+def test_tail_log_reads_a_bounded_suffix_and_list_jobs_skips_logs(
+    manager_parts, monkeypatch
+) -> None:
+    manager, _, _, _, _, _, tmp_path = manager_parts
+    view = create(manager)
+    log = tmp_path / "service_data/logs" / f"{view.id}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_bytes(b"ignored line\n" * 100_000 + b"last one\nlast two\n")
+    log_size = log.stat().st_size
+    original_open = Path.open
+    bytes_read = 0
+
+    class ReadSpy:
+        def __init__(self, wrapped) -> None:
+            self._wrapped = wrapped
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self._wrapped.__exit__(*args)
+
+        def seek(self, *args):
+            return self._wrapped.seek(*args)
+
+        def tell(self):
+            return self._wrapped.tell()
+
+        def read(self, size=-1):
+            nonlocal bytes_read
+            data = self._wrapped.read(size)
+            bytes_read += len(data)
+            return data
+
+    def tracking_open(path, *args, **kwargs):
+        opened = original_open(path, *args, **kwargs)
+        if path == log:
+            return ReadSpy(opened)
+        return opened
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    assert manager.tail_log(view.id, limit=2) == ["last one", "last two"]
+    assert bytes_read < log_size // 10
+
+    def unexpected_log_read(*args, **kwargs):
+        raise AssertionError("list_jobs must not read per-job logs")
+
+    monkeypatch.setattr(manager, "_read_log", unexpected_log_read)
+    assert [item.id for item in manager.list_jobs()] == [view.id]
+    with pytest.raises(AssertionError, match="per-job logs"):
+        manager.get_job(view.id)
+
+
 def test_files_open_is_delegated_and_archive_requires_success(manager_parts) -> None:
     manager, store, _, _, _, files, tmp_path = manager_parts
     view = create(manager)
@@ -344,6 +399,26 @@ def test_constructor_rejects_invalid_environment_overrides(tmp_path, monkeypatch
         monkeypatch.setenv(name, value)
         with pytest.raises(ValueError, match=name):
             JobManager(**dependencies)
+
+
+@pytest.mark.parametrize(
+    "override", [{"max_upload_bytes": True}, {"max_vlm_workers": False}]
+)
+def test_constructor_rejects_boolean_integer_overrides(tmp_path, override) -> None:
+    dependencies = dict(
+        store=JobStore(tmp_path / "jobs.sqlite3"),
+        inventory=FakeInventory(),
+        scheduler=FakeScheduler(),
+        files=JobFiles(),
+        secrets=SecretStore(),
+        upload_root=tmp_path / "uploads",
+        output_root=tmp_path / "outputs",
+        log_root=tmp_path / "logs",
+        archive_root=tmp_path / "archives",
+    )
+
+    with pytest.raises(ValueError, match="positive|between"):
+        JobManager(**dependencies, **override)
 
 
 def test_worker_default_is_lowered_by_configured_cap(tmp_path: Path) -> None:
@@ -472,15 +547,12 @@ def test_rollback_retries_transient_secret_and_status_cleanup_failures(
     assert update_calls >= 2
 
 
-def test_submit_partial_mutation_is_compensated_with_cancel(tmp_path: Path) -> None:
+def test_atomic_submit_failure_does_not_attempt_scheduler_cancellation(
+    tmp_path: Path,
+) -> None:
     store = JobStore(tmp_path / "jobs.sqlite3")
     scheduler = FakeScheduler()
-
-    def partial_submit(job: JobRecord) -> None:
-        scheduler.submitted.append(job)
-        raise RuntimeError("thread start failed")
-
-    scheduler.submit = partial_submit
+    scheduler.submit_error = RuntimeError("thread start failed")
     manager = JobManager(
         store=store,
         inventory=FakeInventory(),
@@ -498,8 +570,72 @@ def test_submit_partial_mutation_is_compensated_with_cancel(tmp_path: Path) -> N
         manager.create_job(io.BytesIO(b"%PDF"), "bid.pdf", valid_form(), "key")
 
     record = store.list()[0]
-    assert scheduler.cancelled == [record.id]
+    assert scheduler.submitted == []
+    assert scheduler.cancelled == []
     assert record.status is JobStatus.FAILED
+
+
+def test_preexisting_upload_directory_is_never_removed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manager = JobManager(
+        store=JobStore(tmp_path / "jobs.sqlite3"),
+        inventory=FakeInventory(),
+        scheduler=FakeScheduler(),
+        files=JobFiles(),
+        secrets=SecretStore(),
+        upload_root=tmp_path / "uploads",
+        output_root=tmp_path / "outputs",
+        log_root=tmp_path / "logs",
+        archive_root=tmp_path / "archives",
+        max_upload_bytes=100,
+    )
+    original_mkdir = Path.mkdir
+    marker = tmp_path / "marker"
+
+    def collide_with_upload(path, *args, **kwargs):
+        if path.parent == tmp_path / "uploads" and path.name != "uploads":
+            original_mkdir(path, parents=True, exist_ok=True)
+            (path / "owned-by-someone-else").write_text("keep", encoding="utf-8")
+            marker.write_text(str(path), encoding="utf-8")
+        return original_mkdir(path, *args, **kwargs)
+
+    # Force a collision without depending on the randomly generated job id.
+    monkeypatch.setattr(Path, "mkdir", collide_with_upload)
+    with pytest.raises(JobManagerError, match="Could not create job"):
+        manager.create_job(io.BytesIO(b"%PDF"), "bid.pdf", valid_form(), "key")
+
+    collided = Path(marker.read_text(encoding="utf-8"))
+    assert (collided / "owned-by-someone-else").read_text(encoding="utf-8") == "keep"
+
+
+def test_upload_cleanup_failure_is_visible_and_redacted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manager = JobManager(
+        store=JobStore(tmp_path / "jobs.sqlite3"),
+        inventory=FakeInventory(),
+        scheduler=FakeScheduler(),
+        files=JobFiles(),
+        secrets=SecretStore(),
+        upload_root=tmp_path / "uploads",
+        output_root=tmp_path / "outputs",
+        log_root=tmp_path / "logs",
+        archive_root=tmp_path / "archives",
+        max_upload_bytes=100,
+    )
+
+    def fail_cleanup(path):
+        raise PermissionError("cleanup exposed private-key")
+
+    monkeypatch.setattr("bid_knowledge.service.jobs.manager.shutil.rmtree", fail_cleanup)
+
+    with pytest.raises(JobValidationError) as caught:
+        manager.create_job(
+            io.BytesIO(b"not-pdf"), "bid.pdf", valid_form(), "private-key"
+        )
+    assert "cleanup" in str(caught.value)
+    assert "private-key" not in str(caught.value)
 
 
 def test_start_marks_interrupted_and_shutdown_delegates(manager_parts) -> None:

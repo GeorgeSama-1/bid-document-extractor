@@ -47,10 +47,12 @@ class GpuJobScheduler:
         runner: Any,
         log_callback: Callable[[str, str], None] | None = None,
         log_root: str | Path | None = None,
+        thread_factory: Callable[..., Thread] | None = None,
     ) -> None:
         self._store = store
         self._secrets = secrets
         self._runner = runner
+        self._thread_factory = Thread if thread_factory is None else thread_factory
         self._log_callback = log_callback
         self._log_root = Path(log_root) if log_root is not None else None
         if self._log_root is not None:
@@ -73,23 +75,33 @@ class GpuJobScheduler:
                 raise ValueError("submitted job must already be persisted as queued")
 
             worker = self._workers.get(job.gpu_id)
-            start_thread = worker is None
             if worker is None:
                 worker = _GpuWorker(gpu_id=job.gpu_id)
-                worker.thread = Thread(
+                worker.thread = self._thread_factory(
                     target=self._worker_main,
                     args=(worker,),
                     name=f"bid-gpu-{job.gpu_id}",
                     daemon=True,
                 )
+                try:
+                    worker.thread.start()
+                except Exception:
+                    # A worker is deliberately started while it is still empty and
+                    # private to this call.  If Thread.start() partially succeeds,
+                    # stop and join it before preserving submit's atomic contract.
+                    try:
+                        started = worker.thread.is_alive()
+                    except (AttributeError, RuntimeError):
+                        started = False
+                    if started:
+                        worker.queue.put(_STOP)
+                        worker.thread.join()
+                    raise
                 self._workers[job.gpu_id] = worker
 
             self._entries[job.id] = _JobEntry(job=job)
             worker.pending.append(job.id)
             worker.queue.put(job.id)
-            if start_thread:
-                assert worker.thread is not None
-                worker.thread.start()
             self._condition.notify_all()
 
     def cancel(self, job_id: str) -> bool:

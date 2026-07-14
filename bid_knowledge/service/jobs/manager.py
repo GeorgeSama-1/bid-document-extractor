@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import errno
 import os
 import shutil
-from collections import deque
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +21,7 @@ from bid_knowledge.service.jobs.store import JobStore
 _DEFAULT_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 _DEFAULT_MAX_VLM_WORKERS = 128
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+_LOG_READ_BLOCK_BYTES = 8192
 
 
 class JobManagerError(RuntimeError):
@@ -127,7 +128,7 @@ class JobManager:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{name} must be a positive integer") from exc
         if (
-            isinstance(raw, float)
+            isinstance(raw, (bool, float))
             or value <= 0
             or (maximum is not None and value > maximum)
         ):
@@ -174,14 +175,21 @@ class JobManager:
         )
         upload_dir = self._upload_root / job.id
         persisted = False
-        submit_attempted = False
+        upload_owned = False
+        upload_root_owned = False
+        output_owned = False
+        output_root_owned = False
         try:
+            upload_root_owned = self._ensure_directory(self._upload_root)
+            upload_dir.mkdir(exist_ok=False)
+            upload_owned = True
             self._save_upload(upload, upload_dir)
-            output_dir.mkdir(parents=True, exist_ok=False)
+            output_root_owned = self._ensure_directory(self._output_root)
+            output_dir.mkdir(exist_ok=False)
+            output_owned = True
             self._store.create(job)
             persisted = True
             self._secrets.put(job.id, api_key)
-            submit_attempted = True
             self._scheduler.submit(job)
         except JobValidationError as exc:
             rollback_errors = self._rollback_creation(
@@ -190,7 +198,10 @@ class JobManager:
                 output_dir,
                 api_key,
                 persisted,
-                submit_attempted,
+                upload_owned,
+                upload_root_owned,
+                output_owned,
+                output_root_owned,
                 None,
             )
             safe_error = redact_secret(str(exc), api_key)
@@ -210,7 +221,10 @@ class JobManager:
                 output_dir,
                 api_key,
                 persisted,
-                submit_attempted,
+                upload_owned,
+                upload_root_owned,
+                output_owned,
+                output_root_owned,
                 safe_error,
             )
             if rollback_errors:
@@ -224,7 +238,6 @@ class JobManager:
         total = 0
         header = bytearray()
         try:
-            upload_dir.mkdir(parents=True, exist_ok=False)
             with temporary_path.open("xb") as destination:
                 while True:
                     chunk = upload.read(_UPLOAD_CHUNK_BYTES)
@@ -244,10 +257,8 @@ class JobManager:
                 raise JobValidationError("The uploaded file has an invalid PDF header")
             os.replace(temporary_path, final_path)
         except JobValidationError:
-            self._remove_tree(upload_dir)
             raise
         except Exception as exc:
-            self._remove_tree(upload_dir)
             raise JobValidationError(f"Upload failed: {exc}") from None
 
     def _rollback_creation(
@@ -257,17 +268,13 @@ class JobManager:
         output_dir: Path,
         api_key: str,
         persisted: bool,
-        submit_attempted: bool,
+        upload_owned: bool,
+        upload_root_owned: bool,
+        output_owned: bool,
+        output_root_owned: bool,
         error: str | None,
     ) -> list[str]:
         rollback_errors: list[str] = []
-        if submit_attempted:
-            try:
-                self._scheduler.cancel(job.id)
-            except Exception as exc:
-                rollback_errors.append(
-                    redact_secret(f"scheduler compensation failed: {exc}", api_key)
-                )
         secret_error: Exception | None = None
         for _attempt in range(3):
             try:
@@ -283,10 +290,30 @@ class JobManager:
                     api_key,
                 )
             )
-        self._remove_tree(upload_dir)
-        self._remove_tree(output_dir)
-        self._remove_empty_parent(self._upload_root)
-        self._remove_empty_parent(self._output_root)
+        for path, owned, label in (
+            (upload_dir, upload_owned, "upload cleanup"),
+            (output_dir, output_owned, "output cleanup"),
+        ):
+            if not owned:
+                continue
+            try:
+                self._remove_tree(path)
+            except Exception as exc:
+                rollback_errors.append(
+                    redact_secret(f"{label} failed: {exc}", api_key)
+                )
+        for path, owned, label in (
+            (self._upload_root, upload_root_owned, "upload root cleanup"),
+            (self._output_root, output_root_owned, "output root cleanup"),
+        ):
+            if not owned:
+                continue
+            try:
+                self._remove_empty_parent(path)
+            except Exception as exc:
+                rollback_errors.append(
+                    redact_secret(f"{label} failed: {exc}", api_key)
+                )
         if persisted:
             safe_error = redact_secret(error or "Job creation failed", api_key)
             status_error: Exception | None = None
@@ -314,14 +341,32 @@ class JobManager:
 
     @staticmethod
     def _remove_tree(path: Path) -> None:
-        shutil.rmtree(path, ignore_errors=True)
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
+
+    @staticmethod
+    def _ensure_directory(path: Path) -> bool:
+        """Ensure a directory exists and report whether this call created it."""
+        try:
+            path.mkdir(parents=True, exist_ok=False)
+            return True
+        except FileExistsError:
+            if not path.is_dir():
+                raise
+            return False
 
     @staticmethod
     def _remove_empty_parent(path: Path) -> None:
         try:
             path.rmdir()
-        except OSError:
-            pass
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+                return
+            raise
 
     def _validate_form(self, form: Mapping[str, str]) -> tuple[str, JobParameters]:
         gpu_id = form.get("gpu_id", "")
@@ -418,7 +463,9 @@ class JobManager:
         return value
 
     def list_jobs(self) -> list[JobView]:
-        return [self._to_view(record) for record in self._store.list()]
+        return [
+            self._to_view(record, include_logs=False) for record in self._store.list()
+        ]
 
     def get_job(self, job_id: str) -> JobView:
         return self._to_view(self._get_record(job_id))
@@ -429,7 +476,13 @@ class JobManager:
             raise JobNotFoundError(job_id)
         return record
 
-    def _to_view(self, record: JobRecord, *, dynamic: bool = True) -> JobView:
+    def _to_view(
+        self,
+        record: JobRecord,
+        *,
+        dynamic: bool = True,
+        include_logs: bool = True,
+    ) -> JobView:
         queue_position = None
         if dynamic and record.status is JobStatus.QUEUED:
             queue_position = self._scheduler.queue_position(record.id)
@@ -450,7 +503,9 @@ class JobManager:
             started_at=record.started_at,
             finished_at=record.finished_at,
             error=record.error,
-            logs=self._read_log(record.id, limit=200) if dynamic else [],
+            logs=self._read_log(record.id, limit=200)
+            if dynamic and include_logs
+            else [],
             run_name=record.run_name if record.status is JobStatus.SUCCEEDED else None,
         )
 
@@ -477,8 +532,22 @@ class JobManager:
             return []
         path = self._log_root / f"{job_id}.log"
         try:
-            with path.open("r", encoding="utf-8", errors="replace") as log:
-                lines = deque((line.rstrip("\r\n") for line in log), maxlen=limit)
+            with path.open("rb") as log:
+                log.seek(0, os.SEEK_END)
+                remaining = log.tell()
+                chunks: list[bytes] = []
+                newline_count = 0
+                while remaining > 0 and newline_count <= limit:
+                    size = min(_LOG_READ_BLOCK_BYTES, remaining)
+                    remaining -= size
+                    log.seek(remaining)
+                    chunk = log.read(size)
+                    chunks.append(chunk)
+                    newline_count += chunk.count(b"\n")
+                text = b"".join(reversed(chunks)).decode(
+                    "utf-8", errors="replace"
+                )
+                lines = text.splitlines()[-limit:]
                 return [self._secrets.redact(job_id, line) for line in lines]
         except FileNotFoundError:
             return []
