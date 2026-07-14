@@ -114,7 +114,13 @@ class ControlledRunner:
 
 
 def make_scheduler(
-    tmp_path, runner, *, secrets=None, log_callback=None, thread_factory=None
+    tmp_path,
+    runner,
+    *,
+    secrets=None,
+    success_callback=None,
+    log_callback=None,
+    thread_factory=None,
 ):
     store = JobStore(tmp_path / "jobs.sqlite3")
     secrets = secrets or SecretStore()
@@ -125,10 +131,61 @@ def make_scheduler(
         store=store,
         secrets=secrets,
         runner=runner,
+        success_callback=success_callback,
         log_callback=log_callback,
         **scheduler_kwargs,
     )
     return store, secrets, scheduler
+
+
+def test_success_callback_finishes_before_job_becomes_downloadable(tmp_path) -> None:
+    runner = ControlledRunner()
+    archive_ready = threading.Event()
+    callback_jobs: list[str] = []
+
+    def prepare_archive(job: JobRecord) -> None:
+        callback_jobs.append(job.id)
+        archive_ready.set()
+
+    store, secrets, scheduler = make_scheduler(
+        tmp_path,
+        runner,
+        success_callback=prepare_archive,
+    )
+    job = make_job(tmp_path, "archive-ready")
+    try:
+        persist_and_submit(store, secrets, scheduler, job)
+        wait_until(lambda: store.get(job.id).status is JobStatus.SUCCEEDED)
+
+        assert archive_ready.is_set()
+        assert callback_jobs == [job.id]
+    finally:
+        scheduler.shutdown()
+
+
+def test_success_callback_failure_marks_job_failed(tmp_path) -> None:
+    runner = ControlledRunner()
+
+    def fail_archive(_job: JobRecord) -> None:
+        raise OSError("archive disk is read-only")
+
+    store, secrets, scheduler = make_scheduler(
+        tmp_path,
+        runner,
+        success_callback=fail_archive,
+    )
+    job = make_job(tmp_path, "archive-failed")
+    try:
+        persist_and_submit(store, secrets, scheduler, job)
+        wait_until(lambda: store.get(job.id).status is JobStatus.FAILED)
+
+        record = store.get(job.id)
+        assert record is not None
+        assert record.error == (
+            "Material archive creation failed: archive disk is read-only"
+        )
+    finally:
+        scheduler.shutdown()
 
 
 def persist_and_submit(store, secrets, scheduler, job, key=None) -> None:

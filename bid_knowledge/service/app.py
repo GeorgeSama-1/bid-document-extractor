@@ -60,22 +60,34 @@ def _production_manager() -> JobManager:
     secrets = SecretStore()
     upload_root = SERVICE_DATA_DIR / "uploads"
     log_root = SERVICE_DATA_DIR / "logs"
+    archive_root = SERVICE_DATA_DIR / "archives"
+    files = JobFiles()
+
+    def prepare_material_archive(job: Any) -> None:
+        files.material_archive(
+            job.id,
+            Path(job.output_dir),
+            archive_root,
+            package_name=job.filename,
+        )
+
     scheduler = GpuJobScheduler(
         store,
         secrets,
         SubprocessJobRunner(upload_root=upload_root),
+        success_callback=prepare_material_archive,
         log_root=log_root,
     )
     return JobManager(
         store=store,
         inventory=NvidiaSmiInventory(),
         scheduler=scheduler,
-        files=JobFiles(),
+        files=files,
         secrets=secrets,
         upload_root=upload_root,
         output_root=OUTPUTS_DIR,
         log_root=log_root,
-        archive_root=SERVICE_DATA_DIR / "archives",
+        archive_root=archive_root,
     )
 
 

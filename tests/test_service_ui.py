@@ -47,3 +47,4 @@ def test_job_script_covers_api_actions_and_never_persists_key() -> None:
     assert "/files" not in script
     assert "fileUrl" not in script
     assert "下载完整 ZIP" in script
+    assert ".download =" in script

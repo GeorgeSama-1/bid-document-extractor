@@ -107,6 +107,7 @@
   function renderDownloads(job) {
     const archive = document.createElement("a");
     archive.href = `/api/jobs/${encodeURIComponent(job.id)}/archive`;
+    archive.download = `job_${job.id}.zip`;
     archive.textContent = "下载完整 ZIP";
     const browse = document.createElement("button");
     browse.type = "button";

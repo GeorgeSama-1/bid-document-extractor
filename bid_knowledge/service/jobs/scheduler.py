@@ -45,6 +45,7 @@ class GpuJobScheduler:
         store: JobStore,
         secrets: SecretStore,
         runner: Any,
+        success_callback: Callable[[JobRecord], None] | None = None,
         log_callback: Callable[[str, str], None] | None = None,
         log_root: str | Path | None = None,
         thread_factory: Callable[..., Thread] | None = None,
@@ -52,6 +53,7 @@ class GpuJobScheduler:
         self._store = store
         self._secrets = secrets
         self._runner = runner
+        self._success_callback = success_callback
         self._thread_factory = Thread if thread_factory is None else thread_factory
         self._log_callback = log_callback
         self._log_root = Path(log_root) if log_root is not None else None
@@ -317,6 +319,21 @@ class GpuJobScheduler:
                     cancelled=False,
                     error=redact(str(exc)),
                 )
+
+        if result.exit_code == 0 and result.error is None:
+            with self._condition:
+                prepare_success_result = not entry.cancel_requested
+            if prepare_success_result and self._success_callback is not None:
+                try:
+                    on_output("Preparing downloadable material archive")
+                    self._success_callback(job)
+                    on_output("Downloadable material archive is ready")
+                except Exception as exc:
+                    result = RunResult(
+                        exit_code=-1,
+                        cancelled=False,
+                        error=redact(f"Material archive creation failed: {exc}"),
+                    )
 
         with self._condition:
             try:
