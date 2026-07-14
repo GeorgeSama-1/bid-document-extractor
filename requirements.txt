@@ -8,6 +8,7 @@ rapidfuzz>=3.9
 rank-bm25>=0.2.2
 requests>=2.32
 fastapi>=0.111
+python-multipart>=0.0.9
 uvicorn>=0.30
 mcp>=1.2.0
 pytest>=8.2
