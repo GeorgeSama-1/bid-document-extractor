@@ -1,0 +1,47 @@
+from pathlib import Path
+
+
+STATIC = Path("bid_knowledge/service/static")
+
+
+def test_job_ui_has_exact_fields_defaults_and_assets() -> None:
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    for name in (
+        "pdf",
+        "gpu_id",
+        "path_root",
+        "pp_structure_use_doc_orientation_classify",
+        "pp_structure_use_doc_unwarping",
+        "pp_structure_use_textline_orientation",
+        "vlm_endpoint",
+        "vlm_model",
+        "api_key",
+        "vlm_timeout",
+        "vlm_max_tokens",
+        "vlm_workers",
+    ):
+        assert f'name="{name}"' in html
+    assert 'name="api_key" type="password"' in html
+    assert 'name="path_root" type="text" value="PDF"' in html
+    assert 'name="vlm_timeout" type="number" value="1800"' in html
+    assert 'name="vlm_max_tokens" type="number" value="8192"' in html
+    assert 'name="vlm_workers" type="number" value="16"' in html
+    assert 'href="/jobs.css"' in html
+    assert 'src="/jobs.js"' in html
+
+
+def test_job_script_covers_api_actions_and_never_persists_key() -> None:
+    script = (STATIC / "jobs.js").read_text(encoding="utf-8")
+    for path in (
+        "/api/system/gpus",
+        "/api/jobs",
+        "/cancel",
+        "/files",
+        "/archive",
+    ):
+        assert path in script
+    assert "FormData" in script
+    assert "api_key" in script
+    assert "localStorage" not in script
+    assert "sessionStorage" not in script
+    assert ".value = \"\"" in script

@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>解析结果浏览器</title>
+    <link rel="stylesheet" href="/jobs.css" />
     <style>
       * {
         box-sizing: border-box;
@@ -172,6 +173,48 @@
     </style>
   </head>
   <body>
+    <section class="jobs-shell" aria-labelledby="jobsHeading">
+      <div class="jobs-heading">
+        <div><h1 id="jobsHeading">GPU 文档提取任务</h1><p>同卡任务按提交顺序执行，不同 GPU 可并行。</p></div>
+        <button id="jobsRefresh" type="button">刷新任务</button>
+      </div>
+      <form id="jobForm" enctype="multipart/form-data">
+        <div class="job-fields">
+          <label>PDF<input name="pdf" type="file" accept="application/pdf,.pdf" required /></label>
+          <label>物理 GPU<select name="gpu_id" required><option value="">读取中…</option></select></label>
+          <label>目录根名<input name="path_root" type="text" value="PDF" maxlength="100" required /></label>
+          <label>VLM Endpoint<input name="vlm_endpoint" type="url" placeholder="https://vlm.example/v1" required /></label>
+          <label>VLM 模型<input name="vlm_model" type="text" maxlength="200" required /></label>
+          <label>API Key<input name="api_key" type="password" autocomplete="off" /></label>
+        </div>
+        <div class="job-flags">
+          <label><input name="pp_structure_use_doc_orientation_classify" type="checkbox" /> 文档方向分类</label>
+          <label><input name="pp_structure_use_doc_unwarping" type="checkbox" /> 文档展平</label>
+          <label><input name="pp_structure_use_textline_orientation" type="checkbox" /> 文本行方向</label>
+        </div>
+        <details class="job-advanced">
+          <summary>高级参数</summary>
+          <div class="job-fields compact">
+            <label>Timeout（秒）<input name="vlm_timeout" type="number" value="1800" min="1" max="3600" /></label>
+            <label>Max tokens<input name="vlm_max_tokens" type="number" value="8192" min="256" max="32768" /></label>
+            <label>Workers<input name="vlm_workers" type="number" value="16" min="1" max="128" /></label>
+          </div>
+        </details>
+        <div class="job-submit-row">
+          <button id="jobSubmit" type="submit">上传并创建任务</button>
+          <span id="jobFormMessage" role="status"></span>
+        </div>
+      </form>
+      <div class="jobs-grid">
+        <div class="jobs-list-wrap">
+          <table class="jobs-list">
+            <thead><tr><th>任务</th><th>状态</th><th>GPU</th><th>进度</th><th>操作</th></tr></thead>
+            <tbody id="jobsBody"></tbody>
+          </table>
+        </div>
+        <section id="jobDetail" class="job-detail empty">选择任务查看详情、日志和结果文件。</section>
+      </div>
+    </section>
     <div class="app">
       <aside>
         <div class="toolbar">
@@ -407,5 +450,6 @@
 
       loadRuns().catch((error) => setError(error.message));
     </script>
+    <script src="/jobs.js"></script>
   </body>
 </html>
