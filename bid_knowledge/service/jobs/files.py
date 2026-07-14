@@ -41,6 +41,24 @@ def _normalized_logical_root(value: str) -> str:
     )
 
 
+def _portable_package_name(value: str) -> str:
+    filename = str(value or "").replace("\\", "/").rsplit("/", maxsplit=1)[-1]
+    filename = filename.strip()
+    if filename.lower().endswith(".pdf"):
+        filename = filename[:-4]
+    filename = "".join(
+        "_"
+        if character in _INVALID_PORTABLE_CHARACTERS or ord(character) < 32
+        else character
+        for character in filename
+    ).strip(". ")
+    if not filename:
+        filename = "material"
+    if JobFiles._is_windows_device_name(filename):
+        filename = f"_{filename}"
+    return filename
+
+
 class OutputFile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -147,8 +165,9 @@ class JobFiles:
         *,
         strip_components: int,
         logical_root: str,
+        package_name: str,
     ) -> Path:
-        """Build a portable ``history/`` package containing reuse materials only."""
+        """Build a portable ``<document>/history/`` reuse-material package."""
         if not _SAFE_JOB_ID.fullmatch(job_id) or self._is_windows_device_name(job_id):
             raise ValueError("unsafe job id")
         if (
@@ -161,13 +180,13 @@ class JobFiles:
         archive_directory = Path(archive_root)
         archive_directory.mkdir(parents=True, exist_ok=True)
         archive_directory = archive_directory.resolve(strict=True)
-        target = archive_directory / f"{job_id}.materials-v1.zip"
-        lock_id = f"{job_id}.materials-v1"
+        target = archive_directory / f"{job_id}.materials-v2.zip"
+        lock_id = f"{job_id}.materials-v2"
         with self._archive_lock(archive_directory, lock_id):
             if target.is_file() and not target.is_symlink():
                 return target
             descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{job_id}.materials-v1.",
+                prefix=f".{job_id}.materials-v2.",
                 suffix=".tmp",
                 dir=archive_directory,
             )
@@ -179,6 +198,7 @@ class JobFiles:
                     temporary_path,
                     strip_components=strip_components,
                     logical_root=logical_root,
+                    package_name=_portable_package_name(package_name),
                 )
                 os.replace(temporary_path, target)
             finally:
@@ -231,10 +251,12 @@ class JobFiles:
         *,
         strip_components: int,
         logical_root: str,
+        package_name: str,
     ) -> None:
         entries = self._material_archive_entries(
             modules_root,
             strip_components=strip_components,
+            package_name=package_name,
         )
         modules_absolute = Path(modules_root).resolve(strict=True)
         path_map: dict[str, str] = {}
@@ -292,6 +314,7 @@ class JobFiles:
         modules_root: Path,
         *,
         strip_components: int,
+        package_name: str,
     ) -> list[tuple[str, str]]:
         candidates: list[tuple[str, tuple[str, ...]]] = []
         prefixes: set[tuple[str, ...]] = set()
@@ -316,7 +339,7 @@ class JobFiles:
         return sorted(
             (
                 source_relative,
-                PurePosixPath("history", *remaining).as_posix(),
+                PurePosixPath(package_name, "history", *remaining).as_posix(),
             )
             for source_relative, remaining in candidates
         )

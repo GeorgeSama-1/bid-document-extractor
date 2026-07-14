@@ -344,6 +344,10 @@ def test_material_archive_matches_history_layout_and_filters_intermediates(
     tmp_path,
 ) -> None:
     output_root = tmp_path / "output"
+    for chapter in ("1、 商务偏差表", "2、 投标保证金", "4、 法定代表人授权委托书"):
+        chapter_dir = output_root / "modules" / "PDF" / chapter
+        chapter_dir.mkdir(parents=True)
+        (chapter_dir / "material.md").write_text(f"# {chapter}\n", encoding="utf-8")
     material = output_root / "modules" / "PDF" / "3、 补充文件" / "3.3、 投标人基本情况表"
     leaf = material / "3.3.2、 投标人基本情况表2"
     (leaf / "image_items").mkdir(parents=True)
@@ -382,21 +386,25 @@ def test_material_archive_matches_history_layout_and_filters_intermediates(
         tmp_path / "archives",
         strip_components=1,
         logical_root="PDF",
+        package_name="material.pdf",
     )
 
-    assert archive.name == "job-1.materials-v1.zip"
+    assert archive.name == "job-1.materials-v2.zip"
     with zipfile.ZipFile(archive) as bundle:
         assert bundle.namelist() == [
-            "history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/image_items/证书.jpeg",
-            "history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/material.md",
-            "history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/table_items/表1.json",
+            "material/history/1、 商务偏差表/material.md",
+            "material/history/2、 投标保证金/material.md",
+            "material/history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/image_items/证书.jpeg",
+            "material/history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/material.md",
+            "material/history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/table_items/表1.json",
+            "material/history/4、 法定代表人授权委托书/material.md",
         ]
-        markdown = bundle.read(bundle.namelist()[1]).decode()
+        markdown = bundle.read(bundle.namelist()[3]).decode()
         assert markdown == "# 投标人基本情况表2\n\n![证书](image_items/证书.jpeg)\n"
-        table = json.loads(bundle.read(bundle.namelist()[2]))
+        table = json.loads(bundle.read(bundle.namelist()[4]))
         assert table["section_path"] == "3、 补充文件 / 3.3、 投标人基本情况表 / 3.3.2、 投标人基本情况表2"
         assert table["folder_parts"] == ["3、 补充文件", "3.3、 投标人基本情况表", "3.3.2、 投标人基本情况表2"]
-        assert table["json_path"].startswith("history/3、 补充文件/")
+        assert table["json_path"].startswith("material/history/3、 补充文件/")
         assert table["source_file"] == "input.pdf"
         assert table["table_model"]["cells"][0]["image_ref"].endswith("image_items/证书.jpeg")
 
@@ -412,7 +420,12 @@ def test_material_archive_rejects_mismatched_or_symlinked_roots(tmp_path) -> Non
     (second / "material.md").write_text("two")
     with pytest.raises(ValueError, match="path root"):
         JobFiles().material_archive(
-            "job-2", output_root, tmp_path / "archives", strip_components=1, logical_root="PDF"
+            "job-2",
+            output_root,
+            tmp_path / "archives",
+            strip_components=1,
+            logical_root="PDF",
+            package_name="material.pdf",
         )
 
     outside = tmp_path / "outside"
@@ -423,5 +436,10 @@ def test_material_archive_rejects_mismatched_or_symlinked_roots(tmp_path) -> Non
     (safe_output / "modules").symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="symlink"):
         JobFiles().material_archive(
-            "job-3", safe_output, tmp_path / "archives", strip_components=1, logical_root="PDF"
+            "job-3",
+            safe_output,
+            tmp_path / "archives",
+            strip_components=1,
+            logical_root="PDF",
+            package_name="material.pdf",
         )

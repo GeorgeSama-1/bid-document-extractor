@@ -589,6 +589,7 @@ class JobManager:
             self._archive_root,
             strip_components=len(logical_root.split(" / ")),
             logical_root=logical_root,
+            package_name=record.filename,
         )
 
     def start(self) -> None:
