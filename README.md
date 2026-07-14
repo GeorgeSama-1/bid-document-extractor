@@ -55,62 +55,213 @@ pip install -r requirements-vector.txt
 
 ## GPU Web 服务
 
-项目提供面向单用户可信内网的 GPU 文档提取服务。浏览器访问 `http://172.20.0.160:8000` 后，可一次上传一个 PDF，选择服务器物理 GPU，并配置目录根名、三个 PP-Structure 预处理开关、VLM Endpoint、模型、API Key、timeout、max tokens 和 workers。页面会显示队列位置、阶段进度、脱敏日志、错误和取消操作；任务成功后可浏览结果并下载轻量素材 ZIP。
+项目提供面向可信内网的 GPU 文档提取页面。用户上传一个 PDF、选择物理 GPU 并填写 VLM 参数后，服务会运行 PDF 目录驱动流水线，展示排队状态、解析进度和脱敏日志；任务成功后提供轻量素材 ZIP 下载。
 
-服务必须使用已经安装 GPU 版 PaddlePaddle、PaddleOCR 及项目依赖的 Python 环境，并以单实例、单 Uvicorn worker 运行。同一张 GPU 上的任务严格 FIFO 串行，不同 GPU 的任务可以并行。服务监听 `0.0.0.0:8000`，不提供登录或 HTTPS，只能通过主机防火墙开放给可信内网，禁止直接暴露到公网。
+### 1. 运行前提
 
-API Key 只保存在服务进程内存和任务子进程的 `VLM_API_KEY` 环境变量中，不进入 SQLite、命令行参数、日志、API 响应、输出文件或 ZIP。任务结束、取消或服务关闭后会清除内存中的 Key。页面提交成功后也会立即清空密码输入框，不会把 Key 写入 URL 或浏览器存储。
+- Linux 服务器可以执行 `nvidia-smi`。
+- 使用 Python 3.10 或更高版本的独立环境。
+- 该环境已安装与服务器 CUDA/驱动匹配的 GPU 版 PaddlePaddle 和 PaddleOCR。
+- 服务器能够访问填写在页面中的 VLM Endpoint。
+- 服务只能运行一个 Uvicorn worker、一个服务实例；同一 GPU 上的任务串行执行，不同 GPU 可以并行。
 
-### systemd 部署
-
-先编辑示例中的绝对项目路径、GPU Python 环境和运行用户，再安装并启动：
+`requirements.txt` 安装项目通用依赖，但不固定 PaddlePaddle/PaddleOCR 的版本。请按服务器 CUDA 环境安装这两个组件，然后检查：
 
 ```bash
-cd /ABSOLUTE/PATH/TO/bid_source/bid-document-extractor
-/ABSOLUTE/PATH/TO/GPU_ENV/bin/python -m pip install -r requirements.txt
-sudo cp deploy/bid-document-extractor.env.example /etc/bid-document-extractor.env
-sudo cp deploy/bid-document-extractor.service.example /etc/systemd/system/bid-document-extractor.service
+cd /bwopt/MODELS/hj/bid_source_v1/bid-document-extractor
+/data/miniforge3/envs/ppstructure/bin/python -m pip install -r requirements.txt
+
+nvidia-smi
+/data/miniforge3/envs/ppstructure/bin/python -c \
+  "import paddle; print(paddle.__version__, paddle.device.get_device())"
+/data/miniforge3/envs/ppstructure/bin/python -c \
+  "import paddleocr; print('PaddleOCR import OK')"
+```
+
+PaddleOCR 是 OCR/文档解析工具库，不是单一模型；项目服务当前通过它的 PP-StructureV3 能力进行版面定位。底层 OCR 或 VLM 模型可以替换，但需要保持当前调用接口兼容，或修改相应适配代码。
+
+### 2. 服务器目录
+
+仓库的父目录是运行根目录。推荐结构如下：
+
+```text
+/bwopt/MODELS/hj/bid_source_v1/
+├── bid-document-extractor/  # Git 代码仓库
+├── data/                    # 手工输入和配置
+├── outputs/                 # 每个 Web 任务的解析结果
+└── service_data/            # SQLite、上传副本、日志、锁和 ZIP 缓存
+```
+
+首次部署时执行：
+
+```bash
+cd /bwopt/MODELS/hj/bid_source_v1
+git clone https://github.com/GeorgeSama-1/bid-document-extractor.git
+mkdir -p data/raw data/configs outputs service_data
+cd bid-document-extractor
+```
+
+如果仓库已经存在，只需进入仓库并更新：
+
+```bash
+cd /bwopt/MODELS/hj/bid_source_v1/bid-document-extractor
+git pull origin main
+```
+
+不要把运行产生的 `data/`、`outputs/`、`service_data/` 放进仓库。`BID_SOURCE_ROOT` 必须填写父目录 `/bwopt/MODELS/hj/bid_source_v1`，不能填写仓库目录。
+
+### 3. 前台试运行
+
+第一次部署建议先在当前终端启动，确认环境与端口都正常：
+
+```bash
+conda activate ppstructure
+cd /bwopt/MODELS/hj/bid_source_v1/bid-document-extractor
+
+export BID_SOURCE_ROOT=/bwopt/MODELS/hj/bid_source_v1
+export BID_SERVICE_HOST=0.0.0.0
+export BID_SERVICE_PORT=8002
+export BID_SERVICE_MAX_UPLOAD_BYTES=524288000
+export BID_SERVICE_MAX_VLM_WORKERS=128
+
+python -m scripts.run_service
+```
+
+看到 Uvicorn 启动信息后，另开终端检查：
+
+```bash
+curl http://127.0.0.1:8002/api/system/gpus
+```
+
+浏览器访问 `http://服务器IP:8002`。前台服务用 `Ctrl+C` 停止。环境变量赋值后必须使用 `export`，或写在同一条命令前；只执行 `BID_SERVICE_PORT=8002` 不会把变量传给随后启动的 Python 进程。
+
+### 4. 安装为 systemd 服务
+
+前台试运行正常后先按 `Ctrl+C` 停止它，再安装常驻服务。不要同时保留手动进程和 systemd 进程。
+
+```bash
+cd /bwopt/MODELS/hj/bid_source_v1/bid-document-extractor
+
+sudo cp deploy/bid-document-extractor.env.example \
+  /etc/bid-document-extractor.env
+sudo cp deploy/bid-document-extractor.service.example \
+  /etc/systemd/system/bid-document-extractor.service
+
 sudoedit /etc/bid-document-extractor.env
 sudoedit /etc/systemd/system/bid-document-extractor.service
+```
+
+将 `/etc/bid-document-extractor.env` 改为：
+
+```ini
+BID_SOURCE_ROOT=/bwopt/MODELS/hj/bid_source_v1
+BID_SERVICE_HOST=0.0.0.0
+BID_SERVICE_PORT=8002
+BID_SERVICE_MAX_UPLOAD_BYTES=524288000
+BID_SERVICE_MAX_VLM_WORKERS=128
+```
+
+将 unit 中的关键路径和用户改成服务器实际值：
+
+```ini
+User=server
+WorkingDirectory=/bwopt/MODELS/hj/bid_source_v1/bid-document-extractor
+EnvironmentFile=/etc/bid-document-extractor.env
+ExecStart=/data/miniforge3/envs/ppstructure/bin/python -m scripts.run_service
+```
+
+安装并启动：
+
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now bid-document-extractor.service
-sudo systemctl status bid-document-extractor.service
+sudo systemctl status bid-document-extractor.service --no-pager
 sudo journalctl -u bid-document-extractor.service -f
 ```
 
-完整安装说明见 `deploy/SERVER_INSTALL.md`。不要增加 Uvicorn worker 数量，也不要复制 unit 启动第二实例；`service_data/service.lock` 会阻止多实例破坏进程内队列和密钥隔离。
+常用管理命令：
 
-在 `/etc/bid-document-extractor.env` 中必须把 `BID_SOURCE_ROOT` 设置为仓库父目录，例如 `/bwopt/MODELS/hj/bid_source_v1`。服务把 `data/`、`outputs/` 和 `service_data/` 写在该目录下，仓库内部只保留代码。
+```bash
+sudo systemctl start bid-document-extractor.service
+sudo systemctl stop bid-document-extractor.service
+sudo systemctl restart bid-document-extractor.service
+sudo systemctl status bid-document-extractor.service --no-pager
+sudo journalctl -u bid-document-extractor.service -n 200 --no-pager
+```
 
-任务成功后，页面只提供轻量素材 ZIP 下载，不展示中间文件列表或单文件下载入口。Web 归档直接复用 `scripts/export_material_pack.py` 背后的 `export_lightweight_material_pack()`，收集全部章节的 `material.md` 和 `image_items` 图片，不包含 `table_items/*.json`、图片 JSON、`ordered_material.json`、解析缓存和日志。ZIP 使用上传 PDF 去掉扩展名后的名称作为父目录，例如：
+出现 `Unit bid-document-extractor.service not found` 表示 unit 尚未复制到 `/etc/systemd/system/`，或者复制后没有执行 `sudo systemctl daemon-reload`。完整 unit 示例也可参见 [`deploy/SERVER_INSTALL.md`](deploy/SERVER_INSTALL.md)。
+
+### 5. 浏览器使用方法
+
+1. 打开 `http://服务器IP:8002`，确认页面能够列出 GPU。
+2. 选择一个 `.pdf` 文件和物理 GPU。
+3. “目录根名”只用于解析阶段的逻辑章节路径，通常保留 `PDF` 即可，不会出现在最终 ZIP 中。
+4. 填写 OpenAI 兼容的 VLM Endpoint、模型名和 API Key。
+5. 按文档情况选择方向分类、文档展平、文本行方向。普通电子 PDF 通常保持关闭；扫描旋转或拍照文档再按需开启。
+6. `Timeout` 是单次 VLM 请求超时；`Max tokens` 控制单次输出；`Workers` 控制 VLM 并发。首次验证建议把 Workers 调低，再根据 Endpoint 限流和 GPU/网络能力增加。
+7. 点击“上传并创建任务”，在任务列表中查看 `queued`、`running`、`succeeded`、`failed` 或 `cancelled` 状态。
+8. 成功后进入任务详情，点击“下载完整 ZIP”。失败时先查看详情中的错误和脱敏日志。
+
+页面提交成功后会立即清空 API Key 输入框。Key 只存在于服务进程内存和任务子进程的 `VLM_API_KEY` 环境变量中，不写入 SQLite、命令行、日志、API 响应、输出文件或 ZIP。
+
+Web 服务当前固定启用 PP-StructureV3 和 VLM 表格增强。解析时会优先读取 PDF 内置书签目录；没有书签时，会尝试从 PDF 中可提取的印刷目录页推断目录。如果两种方式都无法得到可用目录，任务会提示“当前 PDF 没有可用目录”。纯扫描且没有书签的 PDF 目前不能仅靠正文自动生成可靠目录，需要先补充目录/书签或扩展目录识别逻辑。
+
+### 6. 下载包内容
+
+成功任务只提供轻量素材 ZIP。压缩包包含全部章节的 `material.md` 和 `image_items` 图片，不包含 `table_items/*.json`、图片 JSON、`ordered_material.json`、解析缓存或日志。目录结构为：
 
 ```text
-material/
+<上传的 PDF 文件名，不含 .pdf>/
 └── history/
     ├── 1、……/
     │   └── material.md
     ├── 2、……/
+    │   └── material.md
     ├── 3、补充文件/
-    │   └── ……/
+    │   └── 3.1、……/
     │       ├── material.md
     │       └── image_items/
     └── 4、……/
+        └── material.md
 ```
 
-`modules` 和表单中的逻辑 `path_root` 不会出现在 ZIP 中；`material.md` 内的图片引用会改写为可移植的相对路径。归档过程拒绝路径穿越与符号链接。
+`material.md` 中的图片链接会改写成 ZIP 内可用的相对路径。每次验证应解压到一个新的空目录，不要覆盖解压到旧的 `history/`，否则旧包残留文件会与新包合并，看起来像重复打包。可用下面的命令检查 ZIP 本身是否有重复成员：
 
-### 清空 Web 历史
+```bash
+rm -rf /tmp/material-unpack-check
+mkdir -p /tmp/material-unpack-check
+unzip job_<任务ID>.zip -d /tmp/material-unpack-check
+unzip -Z1 job_<任务ID>.zip | sort | uniq -d
+```
 
-必须先停止服务，避免任务数据库、锁文件和输出目录仍在使用：
+最后一条命令正常情况下没有输出。
+
+### 7. 更新代码与重启
 
 ```bash
 sudo systemctl stop bid-document-extractor.service
-cd /ABSOLUTE/PATH/TO/bid_source
+cd /bwopt/MODELS/hj/bid_source_v1/bid-document-extractor
+git pull origin main
+/data/miniforge3/envs/ppstructure/bin/python -m pip install -r requirements.txt
+sudo systemctl start bid-document-extractor.service
+sudo systemctl status bid-document-extractor.service --no-pager
+```
 
-# 清除任务数据库、上传副本、日志、锁文件和 ZIP 缓存。
+仅执行 `git pull` 不会让已经运行的 Python 进程加载新代码，必须重启服务。若当前仍是前台启动，则按 `Ctrl+C` 停止后重新执行 `python -m scripts.run_service`。
+
+### 8. 清空 Web 历史
+
+清理前必须先停止服务：
+
+```bash
+sudo systemctl stop bid-document-extractor.service
+cd /bwopt/MODELS/hj/bid_source_v1
+
+# 删除浏览器任务历史、上传副本、日志、锁和 ZIP 缓存。
 rm -rf -- service_data
+mkdir -p service_data
 
-# 只清除 Web 服务生成的任务输出，保留其他手工流水线结果。
+# 删除 Web 任务解析结果，但保留 outputs 下其他手工结果。
 find outputs -mindepth 1 -maxdepth 1 \
   -type d -name 'job_*' \
   -exec rm -rf -- {} +
@@ -118,15 +269,21 @@ find outputs -mindepth 1 -maxdepth 1 \
 sudo systemctl start bid-document-extractor.service
 ```
 
-如果只想清除浏览器任务历史并保留 `outputs/job_*` 解析结果，只删除 `service_data`。不要删除 `bid-document-extractor` 仓库、原始输入 PDF 或整个 `outputs` 目录。
+如果只想清空浏览器任务历史并保留解析结果，只重建 `service_data/`，不要执行 `find outputs ...`。不要删除代码仓库、原始输入 PDF 或整个 `outputs/`。
 
-常见故障检查：
+### 9. 常见故障
 
-- GPU 列表为空或报错：用 systemd 运行用户执行 `nvidia-smi`，确认驱动和 GPU 权限。
-- PaddleOCR 启动失败：确认 unit 的 `ExecStart` 指向安装了 GPU 依赖的 Python 环境。
-- 第二实例无法启动：确认旧服务和子进程已经退出，再检查 `systemctl status` 与日志；不要手工删除仍被持有的锁来并行启动。
-- 任务排队不动：确认所选 GPU 上前一个任务是否仍在运行，必要时从页面取消并查看脱敏日志。
-- 上传被拒绝：检查 PDF 扩展名、`%PDF` 文件头和 `BID_SERVICE_MAX_UPLOAD_BYTES`。
+- GPU 列表为空：以 unit 中的 `User` 执行 `nvidia-smi`，检查驱动和权限。
+- `cannot import name 'UTC' from datetime`：服务器是旧代码或旧依赖，先 `git pull`；当前代码兼容 Python 3.10。
+- Paddle/PaddleOCR 导入失败：`ExecStart` 指向了错误的 Python 环境，或该环境没有安装 GPU 组件。
+- 端口无法访问：先用 `curl 127.0.0.1:端口` 区分服务问题和防火墙问题；再检查 `BID_SERVICE_PORT` 与防火墙放行端口是否一致。
+- 第二实例启动失败：检查是否还有手动启动的 `scripts.run_service` 或旧服务进程；`service_data/service.lock` 会主动拒绝多实例。
+- 任务一直排队：同一 GPU 严格按提交顺序执行，检查该卡上前一个任务是否仍在运行。
+- 上传被拒绝：文件必须以 `.pdf` 结尾、文件头必须是 `%PDF`，且大小不能超过 `BID_SERVICE_MAX_UPLOAD_BYTES`。
+- `No reusable material files were produced`：先确认 `outputs/job_<ID>/modules/` 下确实存在章节 `material.md`，然后确认服务已拉取最新代码并完成重启。
+- 下载后看到重复目录：不要把多个 ZIP 覆盖解压到同一个 `history/`；先用 `unzip -Z1 ... | sort | uniq -d` 判断重复是否真的存在于 ZIP 内。
+
+服务没有登录和 HTTPS，只能通过服务器防火墙开放给可信内网，禁止直接暴露到公网。不要增加 Uvicorn worker 数量，也不要复制 unit 启动第二实例。
 
 ## 目录结构
 
