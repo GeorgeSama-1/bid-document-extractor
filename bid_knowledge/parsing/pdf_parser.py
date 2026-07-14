@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from bid_knowledge.schemas.models import PdfTextBlock, ProcessingPlan
+from bid_knowledge.parsing.printed_toc import infer_printed_toc
 from bid_knowledge.utils.id_utils import make_stable_id
 from bid_knowledge.utils.io_utils import ensure_dir, write_json
 from bid_knowledge.utils.text_utils import clean_text
@@ -71,6 +72,7 @@ def parse_pdf(
             {"level": level, "title": title, "page": page}
             for level, title, page in (doc.get_toc() or [])
         ]
+        meta["toc_source"] = "embedded" if toc_entries else "none"
 
         total_pages = doc.page_count
         for page_index in range(total_pages):
@@ -128,6 +130,14 @@ def parse_pdf(
                 progress_callback(page_index + 1, total_pages)
     finally:
         doc.close()
+
+    if not toc_entries:
+        toc_entries = infer_printed_toc(
+            text_blocks,
+            page_count=int(meta["page_count"]),
+        )
+        if toc_entries:
+            meta["toc_source"] = "printed"
 
     rendered_pages: list[dict[str, Any]] = []
     if out_dir:
