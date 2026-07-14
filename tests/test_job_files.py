@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import threading
 import zipfile
@@ -345,10 +344,10 @@ def test_material_archive_matches_history_layout_and_filters_intermediates(
 ) -> None:
     output_root = tmp_path / "output"
     for chapter in ("1、 商务偏差表", "2、 投标保证金", "4、 法定代表人授权委托书"):
-        chapter_dir = output_root / "modules" / "PDF" / chapter
+        chapter_dir = output_root / "modules" / chapter
         chapter_dir.mkdir(parents=True)
         (chapter_dir / "material.md").write_text(f"# {chapter}\n", encoding="utf-8")
-    material = output_root / "modules" / "PDF" / "3、 补充文件" / "3.3、 投标人基本情况表"
+    material = output_root / "modules" / "3、 补充文件" / "3.3、 投标人基本情况表"
     leaf = material / "3.3.2、 投标人基本情况表2"
     (leaf / "image_items").mkdir(parents=True)
     (leaf / "table_items").mkdir()
@@ -359,24 +358,13 @@ def test_material_archive_matches_history_layout_and_filters_intermediates(
     )
     image_path.write_bytes(b"image")
     (leaf / "image_items" / "证书.json").write_text("{\"meta\": true}")
-    table_path.write_text(
-        json.dumps(
-            {
-                "rows": [],
-                "section_path": "PDF / 3、 补充文件 / 3.3、 投标人基本情况表 / 3.3.2、 投标人基本情况表2",
-                "folder_parts": ["PDF", "3、 补充文件", "3.3、 投标人基本情况表", "3.3.2、 投标人基本情况表2"],
-                "json_path": str(table_path),
-                "source_file": "/srv/uploads/input.pdf",
-                "table_model": {"cells": [{"image_ref": str(image_path)}]},
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    table_path.write_text('{"rows": []}', encoding="utf-8")
     (leaf / "ordered_material.json").write_text("{}")
-    (output_root / "modules" / "PDF" / "material.md").write_text("root navigation")
-    (output_root / "modules" / "商务文件" / "module_meta.json").parent.mkdir(parents=True)
-    (output_root / "modules" / "商务文件" / "module_meta.json").write_text("{}")
+    (output_root / "modules" / "material.md").write_text("root navigation")
+    auxiliary = output_root / "modules" / "商务文件" / "1、 商务偏差表"
+    auxiliary.mkdir(parents=True)
+    (auxiliary / "module_meta.json").write_text("{}")
+    (auxiliary / "material.md").write_text("auxiliary navigation")
     (output_root / "parsed").mkdir()
     (output_root / "parsed" / "tables.json").write_text("{}")
 
@@ -384,29 +372,22 @@ def test_material_archive_matches_history_layout_and_filters_intermediates(
         "job-1",
         output_root,
         tmp_path / "archives",
-        strip_components=1,
-        logical_root="PDF",
+        strip_components=0,
         package_name="material.pdf",
     )
 
-    assert archive.name == "job-1.materials-v2.zip"
+    assert archive.name == "job-1.materials-v3.zip"
     with zipfile.ZipFile(archive) as bundle:
         assert bundle.namelist() == [
             "material/history/1、 商务偏差表/material.md",
             "material/history/2、 投标保证金/material.md",
             "material/history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/image_items/证书.jpeg",
             "material/history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/material.md",
-            "material/history/3、 补充文件/3.3、 投标人基本情况表/3.3.2、 投标人基本情况表2/table_items/表1.json",
             "material/history/4、 法定代表人授权委托书/material.md",
         ]
         markdown = bundle.read(bundle.namelist()[3]).decode()
         assert markdown == "# 投标人基本情况表2\n\n![证书](image_items/证书.jpeg)\n"
-        table = json.loads(bundle.read(bundle.namelist()[4]))
-        assert table["section_path"] == "3、 补充文件 / 3.3、 投标人基本情况表 / 3.3.2、 投标人基本情况表2"
-        assert table["folder_parts"] == ["3、 补充文件", "3.3、 投标人基本情况表", "3.3.2、 投标人基本情况表2"]
-        assert table["json_path"].startswith("material/history/3、 补充文件/")
-        assert table["source_file"] == "input.pdf"
-        assert table["table_model"]["cells"][0]["image_ref"].endswith("image_items/证书.jpeg")
+        assert not any("/table_items/" in name for name in bundle.namelist())
 
 
 def test_material_archive_rejects_mismatched_or_symlinked_roots(tmp_path) -> None:
@@ -424,7 +405,6 @@ def test_material_archive_rejects_mismatched_or_symlinked_roots(tmp_path) -> Non
             output_root,
             tmp_path / "archives",
             strip_components=1,
-            logical_root="PDF",
             package_name="material.pdf",
         )
 
@@ -440,6 +420,5 @@ def test_material_archive_rejects_mismatched_or_symlinked_roots(tmp_path) -> Non
             safe_output,
             tmp_path / "archives",
             strip_components=1,
-            logical_root="PDF",
             package_name="material.pdf",
         )

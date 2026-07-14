@@ -578,17 +578,12 @@ class JobManager:
         record = self._get_record(job_id)
         if record.status is not JobStatus.SUCCEEDED:
             raise JobConflictError("An archive is available only for a successful job")
-        logical_root = " / ".join(
-            component.strip()
-            for component in record.parameters.path_root.split(" / ")
-            if component.strip()
-        )
         return self._files.material_archive(
             job_id,
             Path(record.output_dir),
             self._archive_root,
-            strip_components=len(logical_root.split(" / ")),
-            logical_root=logical_root,
+            # module_packager already removes path_root from physical directories.
+            strip_components=0,
             package_name=record.filename,
         )
 

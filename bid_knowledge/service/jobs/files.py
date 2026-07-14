@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import posixpath
 import re
@@ -28,19 +27,6 @@ _WINDOWS_DEVICE_NAMES = frozenset(
 _MATERIAL_IMAGE_EXTENSIONS = frozenset(
     {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 )
-_LOGICAL_PATH_KEYS = frozenset(
-    {"section_path", "material_path", "rule_section_path"}
-)
-
-
-def _normalized_logical_root(value: str) -> str:
-    return " / ".join(
-        component.strip()
-        for component in str(value or "").split(" / ")
-        if component.strip()
-    )
-
-
 def _portable_package_name(value: str) -> str:
     filename = str(value or "").replace("\\", "/").rsplit("/", maxsplit=1)[-1]
     filename = filename.strip()
@@ -164,7 +150,6 @@ class JobFiles:
         archive_root: Path,
         *,
         strip_components: int,
-        logical_root: str,
         package_name: str,
     ) -> Path:
         """Build a portable ``<document>/history/`` reuse-material package."""
@@ -180,13 +165,13 @@ class JobFiles:
         archive_directory = Path(archive_root)
         archive_directory.mkdir(parents=True, exist_ok=True)
         archive_directory = archive_directory.resolve(strict=True)
-        target = archive_directory / f"{job_id}.materials-v2.zip"
-        lock_id = f"{job_id}.materials-v2"
+        target = archive_directory / f"{job_id}.materials-v3.zip"
+        lock_id = f"{job_id}.materials-v3"
         with self._archive_lock(archive_directory, lock_id):
             if target.is_file() and not target.is_symlink():
                 return target
             descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{job_id}.materials-v2.",
+                prefix=f".{job_id}.materials-v3.",
                 suffix=".tmp",
                 dir=archive_directory,
             )
@@ -197,7 +182,6 @@ class JobFiles:
                     Path(output_root) / "modules",
                     temporary_path,
                     strip_components=strip_components,
-                    logical_root=logical_root,
                     package_name=_portable_package_name(package_name),
                 )
                 os.replace(temporary_path, target)
@@ -250,7 +234,6 @@ class JobFiles:
         temporary_path: Path,
         *,
         strip_components: int,
-        logical_root: str,
         package_name: str,
     ) -> None:
         entries = self._material_archive_entries(
@@ -288,20 +271,6 @@ class JobFiles:
                             path_map=path_map,
                         )
                         bundle.writestr(archive_relative, markdown.encode("utf-8"))
-                    elif source_parts[-2] == "table_items":
-                        payload = json.loads(source.read().decode("utf-8"))
-                        payload = self._rewrite_json_paths(
-                            payload,
-                            path_map=path_map,
-                            strip_components=strip_components,
-                            logical_root=logical_root,
-                        )
-                        bundle.writestr(
-                            archive_relative,
-                            json.dumps(payload, ensure_ascii=False, indent=2).encode(
-                                "utf-8"
-                            ),
-                        )
                     else:
                         with bundle.open(archive_relative, mode="w") as destination:
                             shutil.copyfileobj(
@@ -318,8 +287,17 @@ class JobFiles:
     ) -> list[tuple[str, str]]:
         candidates: list[tuple[str, tuple[str, ...]]] = []
         prefixes: set[tuple[str, ...]] = set()
-        for relative_path, _file_path in cls._iter_safe_files(modules_root):
+        safe_files = list(cls._iter_safe_files(modules_root))
+        auxiliary_roots = {
+            parts[0]
+            for relative_path, _file_path in safe_files
+            if len(parts := PurePosixPath(relative_path).parts) >= 2
+            and parts[-1] == "module_meta.json"
+        }
+        for relative_path, _file_path in safe_files:
             parts = PurePosixPath(relative_path).parts
+            if parts and parts[0] in auxiliary_roots:
+                continue
             if not cls._is_material_package_file(parts):
                 continue
             if len(parts) <= strip_components:
@@ -355,8 +333,6 @@ class JobFiles:
         suffix = PurePosixPath(parts[-1]).suffix.lower()
         if parts[-2] == "image_items":
             return suffix in _MATERIAL_IMAGE_EXTENSIONS
-        if parts[-2] == "table_items":
-            return suffix == ".json"
         return False
 
     @staticmethod
@@ -376,58 +352,6 @@ class JobFiles:
             rewritten = rewritten.replace(source, target)
             rewritten = rewritten.replace(source.replace("/", "\\"), target)
         return rewritten
-
-    @classmethod
-    def _rewrite_json_paths(
-        cls,
-        value: object,
-        *,
-        path_map: dict[str, str],
-        strip_components: int,
-        logical_root: str,
-        key: str = "",
-    ) -> object:
-        if isinstance(value, dict):
-            return {
-                item_key: cls._rewrite_json_paths(
-                    item_value,
-                    path_map=path_map,
-                    strip_components=strip_components,
-                    logical_root=logical_root,
-                    key=str(item_key),
-                )
-                for item_key, item_value in value.items()
-            }
-        if isinstance(value, list):
-            if key == "folder_parts":
-                return value[strip_components:]
-            return [
-                cls._rewrite_json_paths(
-                    item,
-                    path_map=path_map,
-                    strip_components=strip_components,
-                    logical_root=logical_root,
-                    key=key,
-                )
-                for item in value
-            ]
-        if not isinstance(value, str):
-            return value
-
-        normalized = value.replace("\\", "/")
-        for source, target in sorted(path_map.items(), key=lambda item: len(item[0]), reverse=True):
-            if normalized == source.replace("\\", "/"):
-                return target
-        if key == "source_file" and (Path(value).is_absolute() or "/" in normalized):
-            return PurePosixPath(normalized).name
-        root = _normalized_logical_root(logical_root)
-        if key in _LOGICAL_PATH_KEYS and root:
-            if value == root:
-                return ""
-            prefix = f"{root} / "
-            if value.startswith(prefix):
-                return value[len(prefix) :]
-        return value
 
     @classmethod
     def _iter_safe_files(cls, output_root: Path) -> Iterator[tuple[str, Path]]:
