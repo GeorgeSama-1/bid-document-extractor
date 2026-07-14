@@ -372,7 +372,6 @@ def test_material_archive_matches_history_layout_and_filters_intermediates(
         "job-1",
         output_root,
         tmp_path / "archives",
-        strip_components=0,
         package_name="material.pdf",
     )
 
@@ -390,24 +389,7 @@ def test_material_archive_matches_history_layout_and_filters_intermediates(
         assert not any("/table_items/" in name for name in bundle.namelist())
 
 
-def test_material_archive_rejects_mismatched_or_symlinked_roots(tmp_path) -> None:
-    output_root = tmp_path / "output"
-    modules = output_root / "modules"
-    first = modules / "PDF" / "一"
-    second = modules / "OTHER" / "二"
-    first.mkdir(parents=True)
-    second.mkdir(parents=True)
-    (first / "material.md").write_text("one")
-    (second / "material.md").write_text("two")
-    with pytest.raises(ValueError, match="path root"):
-        JobFiles().material_archive(
-            "job-2",
-            output_root,
-            tmp_path / "archives",
-            strip_components=1,
-            package_name="material.pdf",
-        )
-
+def test_material_archive_rejects_symlinked_modules_root(tmp_path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "material.md").write_text("secret")
@@ -419,6 +401,5 @@ def test_material_archive_rejects_mismatched_or_symlinked_roots(tmp_path) -> Non
             "job-3",
             safe_output,
             tmp_path / "archives",
-            strip_components=1,
             package_name="material.pdf",
         )

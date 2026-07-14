@@ -582,8 +582,6 @@ class JobManager:
             job_id,
             Path(record.output_dir),
             self._archive_root,
-            # module_packager already removes path_root from physical directories.
-            strip_components=0,
             package_name=record.filename,
         )
 

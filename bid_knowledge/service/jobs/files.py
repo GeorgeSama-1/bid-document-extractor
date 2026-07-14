@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import posixpath
 import re
 import shutil
 import stat
@@ -16,6 +15,10 @@ from typing import BinaryIO
 
 from pydantic import BaseModel, ConfigDict
 
+from bid_knowledge.export.lightweight_material_pack import (
+    export_lightweight_material_pack,
+)
+
 
 _SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 _INVALID_PORTABLE_CHARACTERS = frozenset('<>:"\\|?*')
@@ -23,9 +26,6 @@ _WINDOWS_DEVICE_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{number}" for number in range(1, 10)}
     | {f"LPT{number}" for number in range(1, 10)}
-)
-_MATERIAL_IMAGE_EXTENSIONS = frozenset(
-    {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 )
 def _portable_package_name(value: str) -> str:
     filename = str(value or "").replace("\\", "/").rsplit("/", maxsplit=1)[-1]
@@ -149,19 +149,11 @@ class JobFiles:
         output_root: Path,
         archive_root: Path,
         *,
-        strip_components: int,
         package_name: str,
     ) -> Path:
         """Build a portable ``<document>/history/`` reuse-material package."""
         if not _SAFE_JOB_ID.fullmatch(job_id) or self._is_windows_device_name(job_id):
             raise ValueError("unsafe job id")
-        if (
-            not isinstance(strip_components, int)
-            or isinstance(strip_components, bool)
-            or strip_components < 0
-        ):
-            raise ValueError("strip_components must be a non-negative integer")
-
         archive_directory = Path(archive_root)
         archive_directory.mkdir(parents=True, exist_ok=True)
         archive_directory = archive_directory.resolve(strict=True)
@@ -181,7 +173,6 @@ class JobFiles:
                 self._write_material_archive(
                     Path(output_root) / "modules",
                     temporary_path,
-                    strip_components=strip_components,
                     package_name=_portable_package_name(package_name),
                 )
                 os.replace(temporary_path, target)
@@ -233,125 +224,32 @@ class JobFiles:
         modules_root: Path,
         temporary_path: Path,
         *,
-        strip_components: int,
         package_name: str,
     ) -> None:
-        entries = self._material_archive_entries(
-            modules_root,
-            strip_components=strip_components,
-            package_name=package_name,
-        )
-        modules_absolute = Path(modules_root).resolve(strict=True)
-        path_map: dict[str, str] = {}
-        for source_relative, archive_relative in entries:
-            absolute = modules_absolute.joinpath(*PurePosixPath(source_relative).parts)
-            for source_text in (
-                str(absolute),
-                absolute.as_posix(),
-                source_relative,
-                f"modules/{source_relative}",
-            ):
-                path_map[source_text] = archive_relative
-
-        with zipfile.ZipFile(
-            temporary_path, mode="w", compression=zipfile.ZIP_DEFLATED
-        ) as bundle:
-            for source_relative, archive_relative in entries:
-                try:
-                    source = self.open_file(modules_root, source_relative)
-                except OSError:
-                    continue
-                source_parts = PurePosixPath(source_relative).parts
-                with source:
-                    if source_parts[-1] == "material.md":
-                        markdown = source.read().decode("utf-8", errors="replace")
-                        markdown = self._rewrite_markdown_paths(
-                            markdown,
-                            archive_relative=archive_relative,
-                            path_map=path_map,
-                        )
-                        bundle.writestr(archive_relative, markdown.encode("utf-8"))
-                    else:
-                        with bundle.open(archive_relative, mode="w") as destination:
-                            shutil.copyfileobj(
-                                source, destination, length=1024 * 1024
-                            )
-
-    @classmethod
-    def _material_archive_entries(
-        cls,
-        modules_root: Path,
-        *,
-        strip_components: int,
-        package_name: str,
-    ) -> list[tuple[str, str]]:
-        candidates: list[tuple[str, tuple[str, ...]]] = []
-        prefixes: set[tuple[str, ...]] = set()
-        safe_files = list(cls._iter_safe_files(modules_root))
-        auxiliary_roots = {
-            parts[0]
-            for relative_path, _file_path in safe_files
-            if len(parts := PurePosixPath(relative_path).parts) >= 2
-            and parts[-1] == "module_meta.json"
-        }
-        for relative_path, _file_path in safe_files:
-            parts = PurePosixPath(relative_path).parts
-            if parts and parts[0] in auxiliary_roots:
-                continue
-            if not cls._is_material_package_file(parts):
-                continue
-            if len(parts) <= strip_components:
-                continue
-            prefix = parts[:strip_components]
-            remaining = parts[strip_components:]
-            minimum_parts = 2 if remaining[-1] == "material.md" else 3
-            if len(remaining) < minimum_parts:
-                continue
-            prefixes.add(prefix)
-            candidates.append((relative_path, remaining))
-
-        if not candidates:
-            raise ValueError("No reusable material files were produced")
-        if len(prefixes) != 1:
-            raise ValueError("Material files do not share one configured path root")
-        return sorted(
-            (
-                source_relative,
-                PurePosixPath(package_name, "history", *remaining).as_posix(),
+        # Validate the source root with the same no-symlink rules as downloads.
+        list(self._iter_safe_files(modules_root))
+        with tempfile.TemporaryDirectory(
+            prefix=".material-pack.", dir=temporary_path.parent
+        ) as package_directory:
+            result = export_lightweight_material_pack(
+                Path(modules_root).parent,
+                package_dir=package_directory,
+                zip_path=temporary_path,
+                include_material_md=True,
+                include_images=True,
+                include_table_json=False,
+                include_image_json=False,
+                include_ordered_material_json=False,
+                include_manifest=False,
+                include_parsed_tables=False,
+                include_table_candidates=False,
+                package_subdir=Path(package_name) / "history",
+                rewrite_material_links=True,
+                exclude_module_indexes=True,
+                include_root_material_md=False,
             )
-            for source_relative, remaining in candidates
-        )
-
-    @staticmethod
-    def _is_material_package_file(parts: tuple[str, ...]) -> bool:
-        if not parts:
-            return False
-        if parts[-1] == "material.md":
-            return True
-        if len(parts) < 2:
-            return False
-        suffix = PurePosixPath(parts[-1]).suffix.lower()
-        if parts[-2] == "image_items":
-            return suffix in _MATERIAL_IMAGE_EXTENSIONS
-        return False
-
-    @staticmethod
-    def _rewrite_markdown_paths(
-        markdown: str,
-        *,
-        archive_relative: str,
-        path_map: dict[str, str],
-    ) -> str:
-        rewritten = markdown
-        markdown_parent = PurePosixPath(archive_relative).parent.as_posix()
-        replacements: list[tuple[str, str]] = []
-        for source, target in path_map.items():
-            relative_target = posixpath.relpath(target, markdown_parent)
-            replacements.append((source, relative_target))
-        for source, target in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
-            rewritten = rewritten.replace(source, target)
-            rewritten = rewritten.replace(source.replace("/", "\\"), target)
-        return rewritten
+            if int(result["material_count"]) == 0:
+                raise ValueError("No reusable material files were produced")
 
     @classmethod
     def _iter_safe_files(cls, output_root: Path) -> Iterator[tuple[str, Path]]:
