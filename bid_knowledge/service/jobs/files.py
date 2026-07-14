@@ -157,13 +157,13 @@ class JobFiles:
         archive_directory = Path(archive_root)
         archive_directory.mkdir(parents=True, exist_ok=True)
         archive_directory = archive_directory.resolve(strict=True)
-        target = archive_directory / f"{job_id}.materials-v4.zip"
-        lock_id = f"{job_id}.materials-v4"
+        target = archive_directory / f"{job_id}.materials-v5.zip"
+        lock_id = f"{job_id}.materials-v5"
         with self._archive_lock(archive_directory, lock_id):
             if target.is_file() and not target.is_symlink():
                 return target
             descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{job_id}.materials-v4.",
+                prefix=f".{job_id}.materials-v5.",
                 suffix=".tmp",
                 dir=archive_directory,
             )
@@ -245,7 +245,6 @@ class JobFiles:
                 include_table_candidates=False,
                 package_subdir=Path(package_name) / "history",
                 rewrite_material_links=True,
-                exclude_module_indexes=True,
                 include_root_material_md=False,
             )
             if int(result["material_count"]) == 0:
