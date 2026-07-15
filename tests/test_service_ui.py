@@ -29,13 +29,13 @@ def test_job_ui_has_exact_fields_defaults_and_assets() -> None:
     assert 'name="vlm_timeout" type="number" value="1800"' in html
     assert 'name="vlm_max_tokens" type="number" value="8192"' in html
     assert 'name="vlm_workers" type="number" value="16"' in html
-    assert 'href="/jobs.css"' in html
-    assert 'src="/jobs.js"' in html
+    assert 'href="/jobs.css?v=' in html
+    assert 'src="/jobs.js?v=' in html
     assert 'id="jobsClearHistory"' in html
     assert 'id="toastRegion"' in html
     assert "投标文档智能解析服务" in html
-    assert "TASK CENTER" in html
-    assert "RESULT EXPLORER" in html
+    assert "运行与历史" in html
+    assert "结果浏览" in html
     assert "expandedPaths" in html
     assert "tree-toggle" in html
 

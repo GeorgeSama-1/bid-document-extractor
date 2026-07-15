@@ -346,6 +346,32 @@ def create_app(job_manager: JobManager | Any | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return FileResponse(file_path, media_type=media_type)
 
+    static_headers = {"Cache-Control": "no-cache, max-age=0, must-revalidate"}
+
+    @application.get("/", include_in_schema=False)
+    def service_console() -> FileResponse:
+        return FileResponse(
+            STATIC_DIR / "index.html",
+            media_type="text/html",
+            headers=static_headers,
+        )
+
+    @application.get("/jobs.css", include_in_schema=False)
+    def service_styles() -> FileResponse:
+        return FileResponse(
+            STATIC_DIR / "jobs.css",
+            media_type="text/css",
+            headers=static_headers,
+        )
+
+    @application.get("/jobs.js", include_in_schema=False)
+    def service_script() -> FileResponse:
+        return FileResponse(
+            STATIC_DIR / "jobs.js",
+            media_type="text/javascript",
+            headers=static_headers,
+        )
+
     application.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
     return application
 

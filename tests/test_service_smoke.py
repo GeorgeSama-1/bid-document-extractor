@@ -19,6 +19,18 @@ class FakeJobManager:
 
 def test_static_jobs_and_existing_runs_smoke_without_gpu() -> None:
     with TestClient(create_app(job_manager=FakeJobManager())) as client:
-        assert client.get("/").status_code == 200
+        index = client.get("/")
+        styles = client.get("/jobs.css?v=test")
+        script = client.get("/jobs.js?v=test")
+        assert index.status_code == 200
+        assert index.headers["content-type"].startswith("text/html")
+        assert styles.status_code == 200
+        assert styles.headers["content-type"].startswith("text/css")
+        assert script.status_code == 200
+        assert script.headers["content-type"].startswith("text/javascript")
+        for response in (index, styles, script):
+            assert response.headers["cache-control"] == (
+                "no-cache, max-age=0, must-revalidate"
+            )
         assert client.get("/api/jobs").status_code == 200
         assert client.get("/api/runs").status_code == 200

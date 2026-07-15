@@ -4,13 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>投标文档智能解析服务</title>
-    <link rel="stylesheet" href="/jobs.css" />
+    <link rel="stylesheet" href="/jobs.css?v=20260715.2" />
   </head>
   <body>
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark">BID</span>
-        <div><strong>投标文档智能解析服务</strong><span>Document Extraction Console</span></div>
+        <span class="brand-mark">文析</span>
+        <div><strong>投标文档智能解析服务</strong><span>结构化解析 · 章节拆分 · 素材归档</span></div>
       </div>
       <div class="service-state"><span></span>服务运行中</div>
     </header>
@@ -18,21 +18,21 @@
     <div class="console-shell">
       <section class="console-panel create-panel" aria-labelledby="jobsHeading">
         <header class="panel-heading">
-          <div><span class="eyebrow">CREATE TASK</span><h1 id="jobsHeading">创建解析任务</h1><p>配置解析引擎并提交 PDF，同一 GPU 上的任务将按顺序执行。</p></div>
+          <div><span class="eyebrow">新建任务</span><h1 id="jobsHeading">创建解析任务</h1><p>上传投标文件并选择需要的解析能力，任务提交后可在下方跟踪进度。</p></div>
           <span class="step-label">01 / 任务配置</span>
         </header>
         <form id="jobForm" enctype="multipart/form-data">
           <section class="form-section">
             <div class="section-heading"><span class="section-index">01</span><div><h2>文件与运行资源</h2><p>选择待处理文档、计算设备和输出根目录。</p></div></div>
             <div class="job-fields">
-              <label><span>PDF 文件</span><input name="pdf" type="file" accept="application/pdf,.pdf" required /></label>
+              <label class="upload-field"><span>PDF 文件</span><input name="pdf" type="file" accept="application/pdf,.pdf" required /><small>请选择需要拆分和归档的投标文件</small></label>
               <label><span>运行 GPU</span><select name="gpu_id" required><option value="">读取中…</option></select></label>
               <label><span>输出根目录名</span><input name="path_root" type="text" value="PDF" maxlength="100" required /></label>
             </div>
           </section>
           <div class="engine-grid">
             <section class="form-section engine-card">
-              <div class="section-heading"><span class="section-index">02</span><div><h2>版面与 OCR</h2><p>控制文档版面分析和图像预处理。</p></div></div>
+              <div class="section-heading"><span class="section-index">02</span><div><h2>版面与 OCR <span class="recommend-tag">推荐开启</span></h2><p>控制文档版面分析和图像预处理。</p></div></div>
               <label class="switch-row"><span><strong>PP-Structure 版面分析</strong><small>识别页面区块、表格与阅读顺序</small></span><input name="enable_pp_structure" type="checkbox" checked /></label>
               <label class="select-row"><span>运行设备</span><select name="pp_structure_device"><option value="gpu">GPU</option><option value="cpu">CPU</option></select></label>
               <div class="job-flags">
@@ -42,7 +42,7 @@
               </div>
             </section>
             <section class="form-section engine-card">
-              <div class="section-heading"><span class="section-index">03</span><div><h2>表格 VLM 增强</h2><p>使用兼容接口增强复杂表格的结构化结果。</p></div></div>
+              <div class="section-heading"><span class="section-index">03</span><div><h2>表格 VLM 增强 <span class="optional-tag">按需使用</span></h2><p>使用兼容接口增强复杂表格的结构化结果。</p></div></div>
               <label class="switch-row"><span><strong>启用 VLM 表格增强</strong><small>关闭后不会发起任何 VLM 请求</small></span><input name="enable_vlm_table" type="checkbox" checked /></label>
               <div class="job-fields vlm-fields primary-vlm-fields">
                 <label><span>VLM Endpoint</span><input name="vlm_endpoint" type="url" placeholder="https://vlm.example/v1" required /></label>
@@ -69,7 +69,7 @@
 
       <section class="console-panel tasks-panel" aria-labelledby="taskListHeading">
         <header class="panel-heading compact-heading">
-          <div><span class="eyebrow">TASK CENTER</span><h2 id="taskListHeading">任务中心</h2><p>查看队列、解析进度、运行日志与下载结果。</p></div>
+          <div><span class="eyebrow">运行与历史</span><h2 id="taskListHeading">任务中心</h2><p>查看队列、解析进度、运行日志与下载结果。</p></div>
           <div class="heading-actions">
             <button id="jobsRefresh" class="secondary-button" type="button">刷新任务</button>
             <button id="jobsClearHistory" class="danger-button" type="button">清空历史</button>
@@ -88,7 +88,7 @@
 
       <section class="console-panel result-panel" aria-labelledby="resultHeading">
         <header class="panel-heading compact-heading">
-          <div><span class="eyebrow">RESULT EXPLORER</span><h2 id="resultHeading">解析结果</h2><p>按原始章节层级浏览已生成的可复用材料。</p></div>
+          <div><span class="eyebrow">结果浏览</span><h2 id="resultHeading">解析结果</h2><p>按原始章节层级浏览已生成的可复用材料。</p></div>
         </header>
         <div class="app">
           <aside class="result-sidebar">
@@ -100,7 +100,7 @@
           </aside>
           <section class="result-content">
             <div class="header">
-              <span class="eyebrow">MATERIAL PREVIEW</span>
+              <span class="eyebrow">材料预览</span>
               <h1 id="title">材料内容预览</h1>
               <div id="subtitle" class="muted">请选择左侧材料目录</div>
             </div>
@@ -361,6 +361,6 @@
       window.resultBrowserLoadRuns = loadRuns;
       loadRuns().catch((error) => setError(error.message));
     </script>
-    <script src="/jobs.js"></script>
+    <script src="/jobs.js?v=20260715.2"></script>
   </body>
 </html>
