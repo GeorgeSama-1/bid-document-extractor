@@ -5,7 +5,12 @@ from io import BytesIO
 from types import SimpleNamespace
 from pathlib import Path
 
-from bid_knowledge.parsing.module_packager import _backfill_missing_material_indexes, _write_material_markdown, package_module_artifacts
+from bid_knowledge.parsing.module_packager import (
+    _backfill_missing_material_indexes,
+    _safe_dirname,
+    _write_material_markdown,
+    package_module_artifacts,
+)
 from bid_knowledge.schemas.models import PageMaterialItem, ParsedTable, PdfTextBlock, ReusableCandidate
 
 
@@ -3494,8 +3499,19 @@ def test_package_module_artifacts_keeps_long_folder_titles_readable_without_hash
 
     child_dirs = [path.name for path in (tmp_path / "modules" / "3、 补充文件").iterdir() if path.is_dir()]
     assert child_dirs
+    assert child_dirs[0] == long_title
     assert not re.search(r"_[0-9a-f]{8}$", child_dirs[0])
     assert child_dirs[0].startswith("（1.1）、 01-2025年35kV及以上输变电一次设备和装置材料供应")
+
+
+def test_safe_dirname_only_shortens_titles_beyond_filesystem_byte_budget() -> None:
+    title = "（1.3.9）、 " + "超长中文标题" * 40
+
+    safe = _safe_dirname(title)
+
+    assert len(safe.encode("utf-8")) <= 240
+    assert re.search(r"_[0-9a-f]{8}$", safe)
+    assert safe == _safe_dirname(title)
 
 
 def test_package_module_artifacts_deduplicates_stream_text_and_skips_page_numbers(tmp_path: Path) -> None:

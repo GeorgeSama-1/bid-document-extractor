@@ -50,19 +50,56 @@ def _should_merge_heading_line(current: PdfTextBlock, following: PdfTextBlock) -
         return False
     if not _horizontally_aligned(current, following):
         return False
-    return _has_strong_continuation_signal(current_text, following_text)
+    return _has_strong_continuation_signal(
+        current_text,
+        following_text,
+        current,
+        following,
+    )
 
 
 def _looks_like_numbered_heading(text: str) -> bool:
     return bool(_NUMBERED_HEADING_RE.match(text)) and is_heading_text(text)
 
 
-def _has_strong_continuation_signal(current: str, following: str) -> bool:
+def _has_strong_continuation_signal(
+    current: str,
+    following: str,
+    current_block: PdfTextBlock,
+    following_block: PdfTextBlock,
+) -> bool:
     if _has_unclosed_bracket(current):
         return True
     if current.endswith(("、", "，", ",", "；", ";", "：", ":")):
         return True
-    return len(current) >= 35 and following.endswith(("）", ")", "。"))
+    if len(current) >= 35 and following.endswith(("）", ")", "。")):
+        return True
+    return _looks_like_visually_wrapped_heading(current, following, current_block, following_block)
+
+
+def _looks_like_visually_wrapped_heading(
+    current: str,
+    following: str,
+    current_block: PdfTextBlock,
+    following_block: PdfTextBlock,
+) -> bool:
+    if len(current) < 35 or len(following) > 48:
+        return False
+    if len(current_block.bbox) < 4 or len(following_block.bbox) < 4:
+        return False
+    current_width = float(current_block.bbox[2]) - float(current_block.bbox[0])
+    following_width = float(following_block.bbox[2]) - float(following_block.bbox[0])
+    if current_width < 320.0 or current_width < following_width * 1.35:
+        return False
+    if abs(float(current_block.bbox[0]) - float(following_block.bbox[0])) > 6.0:
+        return False
+    if (
+        current_block.font_size is not None
+        and following_block.font_size is not None
+        and abs(float(current_block.font_size) - float(following_block.font_size)) > 0.75
+    ):
+        return False
+    return True
 
 
 def _has_unclosed_bracket(text: str) -> bool:

@@ -3037,9 +3037,20 @@ def _item_in_submaterial_ranges(page_no: int, top_y: float | None, ranges: list[
 def _safe_dirname(raw: str) -> str:
     base = sanitize_asset_name(raw).strip() or "未命名层级"
     base = re.sub(r"\s+", " ", base).strip()
-    if len(base) <= 60:
+    max_bytes = 240
+    if len(base.encode("utf-8")) <= max_bytes:
         return base
-    return base[:60].rstrip(" _") or "未命名层级"
+    suffix = f"_{make_stable_id('dirname', base)[-8:]}"
+    byte_budget = max_bytes - len(suffix.encode("utf-8"))
+    shortened = ""
+    used_bytes = 0
+    for character in base:
+        character_bytes = len(character.encode("utf-8"))
+        if used_bytes + character_bytes > byte_budget:
+            break
+        shortened += character
+        used_bytes += character_bytes
+    return f"{shortened.rstrip(' _')}{suffix}" or "未命名层级"
 
 
 def _is_under_section_path(section_path: str, anchor_path: str) -> bool:
