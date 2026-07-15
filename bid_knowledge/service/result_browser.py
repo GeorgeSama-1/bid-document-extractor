@@ -2,9 +2,22 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+
+_NATURAL_NUMBER = re.compile(r"(\d+)")
+
+
+def _natural_name_key(value: str) -> tuple[tuple[int, int | str], ...]:
+    """Sort section names by numeric components instead of raw text order."""
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part.casefold())
+        for part in _NATURAL_NUMBER.split(value)
+        if part
+    )
 
 
 class ResultBrowserError(Exception):
@@ -23,7 +36,9 @@ class ResultBrowser:
         if not self.outputs_dir.exists():
             return []
         runs = []
-        for path in sorted(self.outputs_dir.iterdir(), key=lambda item: item.name):
+        for path in sorted(
+            self.outputs_dir.iterdir(), key=lambda item: _natural_name_key(item.name)
+        ):
             if path.is_dir() and (path / "modules").is_dir():
                 runs.append({"name": path.name, "path": str(path)})
         return runs
@@ -133,7 +148,9 @@ class ResultBrowser:
             for child in path.iterdir()
             if child.is_dir() and child.name not in {"text_items", "table_items", "image_items", "original"}
         ]
-        for child in sorted(child_dirs, key=lambda item: item.name):
+        for child in sorted(
+            child_dirs, key=lambda item: _natural_name_key(item.name)
+        ):
             node["children"].append(self._build_tree(child, modules_dir))
         return node
 

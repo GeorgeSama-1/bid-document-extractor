@@ -72,6 +72,29 @@ def test_builds_module_tree_and_marks_materials(tmp_path: Path) -> None:
     assert material["path"] == "商务模块/材料A"
 
 
+def test_module_tree_uses_natural_section_number_order(tmp_path: Path) -> None:
+    modules = tmp_path / "outputs" / "run" / "modules" / "3、补充文件"
+    for name in (
+        "3.14、其他材料",
+        "3.2、授权材料",
+        "3.1、基本材料",
+        "（10）、附件",
+        "（2）、证书",
+    ):
+        write_json(modules / name / "ordered_material.json", {"items": []})
+
+    tree = ResultBrowser(tmp_path / "outputs").get_module_tree("run")
+
+    names = [node["name"] for node in tree["children"][0]["children"]]
+    assert names == [
+        "3.1、基本材料",
+        "3.2、授权材料",
+        "3.14、其他材料",
+        "（2）、证书",
+        "（10）、附件",
+    ]
+
+
 def test_reads_material_meta_and_enriches_ordered_image_and_submaterial(tmp_path: Path) -> None:
     outputs = make_sample_outputs(tmp_path)
     browser = ResultBrowser(outputs)

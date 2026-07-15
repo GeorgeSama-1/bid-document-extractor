@@ -32,6 +32,10 @@ def test_job_ui_has_exact_fields_defaults_and_assets() -> None:
     assert 'href="/jobs.css"' in html
     assert 'src="/jobs.js"' in html
     assert 'id="jobsClearHistory"' in html
+    assert 'id="toastRegion"' in html
+    assert "投标文档智能解析服务" in html
+    assert "TASK CENTER" in html
+    assert "RESULT EXPLORER" in html
     assert "expandedPaths" in html
     assert "tree-toggle" in html
 
@@ -57,3 +61,5 @@ def test_job_script_covers_api_actions_and_never_persists_key() -> None:
     assert 'method: "DELETE"' in script
     assert "previousTop" in script
     assert "renderedJobId" in script
+    assert "showServiceToast" in script
+    assert "toast-region" in (STATIC / "jobs.css").read_text(encoding="utf-8")
