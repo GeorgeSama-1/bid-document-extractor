@@ -34,6 +34,7 @@ def test_job_ui_has_exact_fields_defaults_and_assets() -> None:
     assert 'id="jobsClearHistory"' in html
     assert 'id="toastRegion"' in html
     assert "投标文档智能解析服务" in html
+    assert '<span class="brand-mark">BW</span>' in html
     assert "运行与历史" in html
     assert "结果浏览" in html
     assert "expandedPaths" in html
