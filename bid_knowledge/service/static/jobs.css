@@ -67,8 +67,8 @@ pre { overflow: auto; margin: 0; padding: 12px; border-radius: 7px; background: 
 .section-heading p { margin: 0; color: var(--slate-500); font-size: 13px; line-height: 1.45; }
 .recommend-tag, .optional-tag { display: inline-flex; margin-left: 6px; padding: 2px 7px; border-radius: 999px; vertical-align: 2px; color: var(--success); background: #e5f6ec; font-size: 11px; font-weight: 700; }
 .optional-tag { color: var(--blue-700); background: var(--blue-100); }
-.job-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-.job-fields label { display: grid; gap: 7px; min-width: 0; color: var(--slate-700); font-size: 14px; font-weight: 600; }
+.job-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.job-fields label { display: grid; align-content: start; gap: 7px; min-width: 0; color: var(--slate-700); font-size: 14px; font-weight: 600; }
 .job-fields label small { color: var(--slate-500); font-size: 12px; font-weight: 400; }
 .engine-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; align-items: stretch; }
 .engine-card { display: flex; flex-direction: column; }
