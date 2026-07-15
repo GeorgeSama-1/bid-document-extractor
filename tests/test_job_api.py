@@ -80,6 +80,13 @@ class FakeManager:
             raise JobConflictError("terminal")
         return self.view
 
+    def delete(self, job_id):
+        self.get_job(job_id)
+        return job_id
+
+    def clear_history(self):
+        return {"deleted": [self.view.id], "active": []}
+
     def list_files(self, job_id):
         self.get_job(job_id)
         return [{"path": "nested/result.txt", "size_bytes": 11}]
@@ -119,6 +126,8 @@ def test_job_routes_and_manual_secret_separation(tmp_path: Path) -> None:
         assert client.get("/api/jobs").json()["jobs"][0]["id"] == "job-1"
         assert client.get("/api/jobs/job-1").status_code == 200
         assert client.post("/api/jobs/job-1/cancel").status_code == 200
+        assert client.delete("/api/jobs/job-1").json() == {"deleted": "job-1"}
+        assert client.delete("/api/jobs").json() == {"deleted": ["job-1"], "active": []}
         assert client.get("/api/jobs/job-1/files").status_code == 200
         download = client.get("/api/jobs/job-1/files/nested/result.txt")
         assert download.content == b"safe result"

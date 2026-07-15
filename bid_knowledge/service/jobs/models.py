@@ -25,11 +25,14 @@ class JobParameters(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     path_root: str = "PDF"
+    enable_pp_structure: bool = True
+    pp_structure_device: str = "gpu"
     pp_structure_use_doc_orientation_classify: bool = False
     pp_structure_use_doc_unwarping: bool = False
     pp_structure_use_textline_orientation: bool = False
-    vlm_endpoint: str
-    vlm_model: str
+    enable_vlm_table: bool = True
+    vlm_endpoint: str = ""
+    vlm_model: str = ""
     vlm_timeout: int = 1800
     vlm_max_tokens: int = 8192
     vlm_workers: int = 16

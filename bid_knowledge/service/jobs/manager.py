@@ -376,37 +376,49 @@ class JobManager:
         path_root = form.get("path_root", "PDF")
         self._validate_length("path_root", path_root, 1, 100)
 
+        enable_pp_structure = self._parse_bool(form, "enable_pp_structure", True)
+        pp_structure_device = form.get("pp_structure_device", "gpu")
+        if pp_structure_device not in {"gpu", "cpu"}:
+            raise JobValidationError("pp_structure_device must be gpu or cpu")
+        enable_vlm_table = self._parse_bool(form, "enable_vlm_table", True)
+
         endpoint = form.get("vlm_endpoint", "")
-        if not endpoint:
+        if enable_vlm_table and not endpoint:
             raise JobValidationError("VLM endpoint is required")
-        if any(
+        if endpoint and any(
             ord(character) <= 32 or ord(character) == 127
             for character in endpoint
         ):
             raise JobValidationError(
                 "VLM endpoint cannot contain whitespace or control characters"
             )
-        try:
-            parsed = urlsplit(endpoint)
-            hostname = parsed.hostname
-            username = parsed.username
-            password = parsed.password
-            parsed.port
-        except ValueError:
-            raise JobValidationError("VLM endpoint is not a valid absolute URL") from None
-        if parsed.scheme not in {"http", "https"}:
-            if not parsed.scheme:
+        if endpoint:
+            try:
+                parsed = urlsplit(endpoint)
+                hostname = parsed.hostname
+                username = parsed.username
+                password = parsed.password
+                parsed.port
+            except ValueError:
+                raise JobValidationError("VLM endpoint is not a valid absolute URL") from None
+            if parsed.scheme not in {"http", "https"}:
+                if not parsed.scheme:
+                    raise JobValidationError("VLM endpoint must be an absolute HTTP(S) URL")
+                raise JobValidationError("VLM endpoint must use HTTP or HTTPS")
+            if not parsed.netloc or hostname is None:
                 raise JobValidationError("VLM endpoint must be an absolute HTTP(S) URL")
-            raise JobValidationError("VLM endpoint must use HTTP or HTTPS")
-        if not parsed.netloc or hostname is None:
-            raise JobValidationError("VLM endpoint must be an absolute HTTP(S) URL")
-        if username is not None or password is not None:
-            raise JobValidationError("VLM endpoint cannot contain credentials")
+            if username is not None or password is not None:
+                raise JobValidationError("VLM endpoint cannot contain credentials")
 
         model = form.get("vlm_model", "")
-        self._validate_length("VLM model", model, 1, 200)
+        if enable_vlm_table:
+            self._validate_length("VLM model", model, 1, 200)
+        elif model:
+            self._validate_length("VLM model", model, 1, 200)
         parameters = JobParameters(
             path_root=path_root,
+            enable_pp_structure=enable_pp_structure,
+            pp_structure_device=pp_structure_device,
             pp_structure_use_doc_orientation_classify=self._parse_bool(
                 form, "pp_structure_use_doc_orientation_classify"
             ),
@@ -416,6 +428,7 @@ class JobManager:
             pp_structure_use_textline_orientation=self._parse_bool(
                 form, "pp_structure_use_textline_orientation"
             ),
+            enable_vlm_table=enable_vlm_table,
             vlm_endpoint=endpoint,
             vlm_model=model,
             vlm_timeout=self._parse_bounded_int(form, "vlm_timeout", 1800, 1, 3600),
@@ -440,8 +453,12 @@ class JobManager:
             )
 
     @staticmethod
-    def _parse_bool(form: Mapping[str, str], name: str) -> bool:
-        value = form.get(name, "false")
+    def _parse_bool(
+        form: Mapping[str, str],
+        name: str,
+        default: bool = False,
+    ) -> bool:
+        value = form.get(name, "true" if default else "false")
         if value == "true":
             return True
         if value == "false":
@@ -584,6 +601,64 @@ class JobManager:
             self._archive_root,
             package_name=record.filename,
         )
+
+    def delete(self, job_id: str) -> str:
+        record = self._get_record(job_id)
+        if record.status not in {
+            JobStatus.SUCCEEDED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        }:
+            raise JobConflictError("A queued or running job must be cancelled before deletion")
+
+        expected_output = self._output_root / record.run_name
+        if Path(record.output_dir).resolve() != expected_output.resolve():
+            raise JobManagerError("Job output path does not match the managed output root")
+
+        self._remove_managed_tree(self._upload_root, self._upload_root / job_id)
+        self._remove_managed_tree(self._output_root, expected_output)
+        self._remove_managed_file(self._log_root, self._log_root / f"{job_id}.log")
+        if self._archive_root.exists():
+            for archive in self._archive_root.glob(f"{job_id}.*"):
+                self._remove_managed_file(self._archive_root, archive)
+        self._secrets.delete(job_id)
+        if not self._store.delete(job_id):
+            raise JobNotFoundError(job_id)
+        return job_id
+
+    def clear_history(self) -> dict[str, list[str]]:
+        deleted: list[str] = []
+        active: list[str] = []
+        for record in self._store.list():
+            if record.status in {JobStatus.QUEUED, JobStatus.RUNNING}:
+                active.append(record.id)
+                continue
+            deleted.append(self.delete(record.id))
+        return {"deleted": deleted, "active": active}
+
+    @staticmethod
+    def _managed_path(root: Path, path: Path) -> Path:
+        resolved_root = Path(root).resolve()
+        resolved_path = Path(path).resolve()
+        if resolved_path == resolved_root or resolved_root not in resolved_path.parents:
+            raise JobManagerError("Refusing to delete a path outside its managed root")
+        return resolved_path
+
+    @classmethod
+    def _remove_managed_tree(cls, root: Path, path: Path) -> None:
+        managed = cls._managed_path(root, path)
+        try:
+            shutil.rmtree(managed)
+        except FileNotFoundError:
+            pass
+
+    @classmethod
+    def _remove_managed_file(cls, root: Path, path: Path) -> None:
+        managed = cls._managed_path(root, path)
+        try:
+            managed.unlink()
+        except FileNotFoundError:
+            pass
 
     def start(self) -> None:
         self._store.mark_interrupted()

@@ -10,9 +10,12 @@ def test_job_ui_has_exact_fields_defaults_and_assets() -> None:
         "pdf",
         "gpu_id",
         "path_root",
+        "enable_pp_structure",
+        "pp_structure_device",
         "pp_structure_use_doc_orientation_classify",
         "pp_structure_use_doc_unwarping",
         "pp_structure_use_textline_orientation",
+        "enable_vlm_table",
         "vlm_endpoint",
         "vlm_model",
         "api_key",
@@ -28,6 +31,9 @@ def test_job_ui_has_exact_fields_defaults_and_assets() -> None:
     assert 'name="vlm_workers" type="number" value="16"' in html
     assert 'href="/jobs.css"' in html
     assert 'src="/jobs.js"' in html
+    assert 'id="jobsClearHistory"' in html
+    assert "expandedPaths" in html
+    assert "tree-toggle" in html
 
 
 def test_job_script_covers_api_actions_and_never_persists_key() -> None:
@@ -48,3 +54,6 @@ def test_job_script_covers_api_actions_and_never_persists_key() -> None:
     assert "fileUrl" not in script
     assert "下载完整 ZIP" in script
     assert ".download =" in script
+    assert 'method: "DELETE"' in script
+    assert "previousTop" in script
+    assert "renderedJobId" in script

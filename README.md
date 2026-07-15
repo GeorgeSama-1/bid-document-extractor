@@ -195,16 +195,16 @@ sudo journalctl -u bid-document-extractor.service -n 200 --no-pager
 
 1. 打开 `http://服务器IP:8002`，确认页面能够列出 GPU。
 2. 选择一个 `.pdf` 文件和物理 GPU。
-3. “目录根名”只用于解析阶段的逻辑章节路径，通常保留 `PDF` 即可，不会出现在最终 ZIP 中。
-4. 填写 OpenAI 兼容的 VLM Endpoint、模型名和 API Key。
-5. 按文档情况选择方向分类、文档展平、文本行方向。普通电子 PDF 通常保持关闭；扫描旋转或拍照文档再按需开启。
-6. `Timeout` 是单次 VLM 请求超时；`Max tokens` 控制单次输出；`Workers` 控制 VLM 并发。首次验证建议把 Workers 调低，再根据 Endpoint 限流和 GPU/网络能力增加。
+3. “输出根目录名”只用于解析阶段的逻辑章节路径，通常保留 `PDF` 即可，不会出现在最终 ZIP 中。
+4. “版面与 OCR”可启用或关闭 PP-Structure，并可选择它使用 GPU 或 CPU；方向分类、文档展平和文本行方向适合扫描旋转或拍照文档，普通电子 PDF 通常保持关闭。
+5. “表格 VLM 增强”可独立启用或关闭。启用时填写 OpenAI 兼容的 Endpoint、模型名和 API Key；关闭后这些字段不再是必填项，流水线也不会发送 VLM 请求。
+6. `Timeout` 是单次 VLM 请求超时；`Max tokens` 控制单次输出；`Workers` 控制 VLM 并发。首次验证建议把 Workers 调低，再根据 Endpoint 限流和网络能力增加。
 7. 点击“上传并创建任务”，在任务列表中查看 `queued`、`running`、`succeeded`、`failed` 或 `cancelled` 状态。
 8. 成功后进入任务详情，点击“下载完整 ZIP”。失败时先查看详情中的错误和脱敏日志。
 
 页面提交成功后会立即清空 API Key 输入框。Key 只存在于服务进程内存和任务子进程的 `VLM_API_KEY` 环境变量中，不写入 SQLite、命令行、日志、API 响应、输出文件或 ZIP。
 
-Web 服务当前固定启用 PP-StructureV3 和 VLM 表格增强。解析时会优先读取 PDF 内置书签目录；没有书签时，会尝试从 PDF 中可提取的印刷目录页推断目录。如果两种方式都无法得到可用目录，任务会提示“当前 PDF 没有可用目录”。纯扫描且没有书签的 PDF 目前不能仅靠正文自动生成可靠目录，需要先补充目录/书签或扩展目录识别逻辑。
+PP-Structure 版面分析和 VLM 表格增强默认启用，但都可以在创建任务时关闭。解析时会优先读取 PDF 内置书签目录；没有书签时，会尝试从 PDF 中可提取的印刷目录页推断目录。如果两种方式都无法得到可用目录，任务会提示“当前 PDF 没有可用目录”。纯扫描且没有书签的 PDF 目前不能仅靠正文自动生成可靠目录，需要先补充目录/书签或扩展目录识别逻辑。
 
 ### 6. 下载包内容
 
@@ -251,7 +251,9 @@ sudo systemctl status bid-document-extractor.service --no-pager
 
 ### 8. 清空 Web 历史
 
-清理前必须先停止服务：
+页面右上角的“清空历史”可以一键删除所有已结束任务的数据库记录、上传副本、日志、ZIP 缓存和对应的 `outputs/job_*` 解析结果；正在排队或运行的任务会保留。任务列表中的“删除”可只删除一个已结束任务。
+
+如果页面无法使用，也可以停服后手工清理：
 
 ```bash
 sudo systemctl stop bid-document-extractor.service
@@ -269,7 +271,7 @@ find outputs -mindepth 1 -maxdepth 1 \
 sudo systemctl start bid-document-extractor.service
 ```
 
-如果只想清空浏览器任务历史并保留解析结果，只重建 `service_data/`，不要执行 `find outputs ...`。不要删除代码仓库、原始输入 PDF 或整个 `outputs/`。
+手工清理时，如果只想清空浏览器任务历史并保留解析结果，只重建 `service_data/`，不要执行 `find outputs ...`。不要删除代码仓库、原始输入 PDF 或整个 `outputs/`。
 
 ### 9. 常见故障
 

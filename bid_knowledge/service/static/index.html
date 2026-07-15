@@ -176,30 +176,44 @@
     <section class="jobs-shell" aria-labelledby="jobsHeading">
       <div class="jobs-heading">
         <div><h1 id="jobsHeading">GPU 文档提取任务</h1><p>同卡任务按提交顺序执行，不同 GPU 可并行。</p></div>
-        <button id="jobsRefresh" type="button">刷新任务</button>
+        <div class="heading-actions">
+          <button id="jobsRefresh" type="button">刷新任务</button>
+          <button id="jobsClearHistory" class="danger-button" type="button">清空历史</button>
+        </div>
       </div>
       <form id="jobForm" enctype="multipart/form-data">
-        <div class="job-fields">
-          <label>PDF<input name="pdf" type="file" accept="application/pdf,.pdf" required /></label>
-          <label>物理 GPU<select name="gpu_id" required><option value="">读取中…</option></select></label>
-          <label>目录根名<input name="path_root" type="text" value="PDF" maxlength="100" required /></label>
-          <label>VLM Endpoint<input name="vlm_endpoint" type="url" placeholder="https://vlm.example/v1" required /></label>
-          <label>VLM 模型<input name="vlm_model" type="text" maxlength="200" required /></label>
-          <label>API Key<input name="api_key" type="password" autocomplete="off" /></label>
-        </div>
-        <div class="job-flags">
-          <label><input name="pp_structure_use_doc_orientation_classify" type="checkbox" /> 文档方向分类</label>
-          <label><input name="pp_structure_use_doc_unwarping" type="checkbox" /> 文档展平</label>
-          <label><input name="pp_structure_use_textline_orientation" type="checkbox" /> 文本行方向</label>
-        </div>
-        <details class="job-advanced">
-          <summary>高级参数</summary>
-          <div class="job-fields compact">
+        <fieldset class="form-section">
+          <legend>任务与输出</legend>
+          <div class="job-fields">
+            <label>PDF 文件<input name="pdf" type="file" accept="application/pdf,.pdf" required /></label>
+            <label>运行 GPU<select name="gpu_id" required><option value="">读取中…</option></select></label>
+            <label>输出根目录名<input name="path_root" type="text" value="PDF" maxlength="100" required /></label>
+          </div>
+        </fieldset>
+        <fieldset class="form-section">
+          <legend>版面与 OCR</legend>
+          <div class="job-switches">
+            <label class="switch"><input name="enable_pp_structure" type="checkbox" checked />启用 PP-Structure 版面分析</label>
+            <label>运行设备<select name="pp_structure_device"><option value="gpu">GPU</option><option value="cpu">CPU</option></select></label>
+          </div>
+          <div class="job-flags">
+            <label><input name="pp_structure_use_doc_orientation_classify" type="checkbox" /> 文档方向分类</label>
+            <label><input name="pp_structure_use_doc_unwarping" type="checkbox" /> 文档展平</label>
+            <label><input name="pp_structure_use_textline_orientation" type="checkbox" /> 文本行方向</label>
+          </div>
+        </fieldset>
+        <fieldset class="form-section">
+          <legend>表格 VLM 增强</legend>
+          <label class="switch"><input name="enable_vlm_table" type="checkbox" checked />启用 VLM 表格增强</label>
+          <div class="job-fields vlm-fields">
+            <label>VLM Endpoint<input name="vlm_endpoint" type="url" placeholder="https://vlm.example/v1" required /></label>
+            <label>VLM 模型<input name="vlm_model" type="text" maxlength="200" required /></label>
+            <label>API Key<input name="api_key" type="password" autocomplete="off" /></label>
             <label>Timeout（秒）<input name="vlm_timeout" type="number" value="1800" min="1" max="3600" /></label>
             <label>Max tokens<input name="vlm_max_tokens" type="number" value="8192" min="256" max="32768" /></label>
             <label>Workers<input name="vlm_workers" type="number" value="16" min="1" max="128" /></label>
           </div>
-        </details>
+        </fieldset>
         <div class="job-submit-row">
           <button id="jobSubmit" type="submit">上传并创建任务</button>
           <span id="jobFormMessage" role="status"></span>
@@ -212,7 +226,7 @@
             <tbody id="jobsBody"></tbody>
           </table>
         </div>
-        <section id="jobDetail" class="job-detail empty">选择任务查看详情、日志和结果文件。</section>
+        <section id="jobDetail" class="job-detail empty" aria-live="polite">选择任务查看详情、日志和结果文件。</section>
       </div>
     </section>
     <div class="app">
@@ -235,6 +249,7 @@
       const state = {
         run: "",
         selectedPath: "",
+        expandedPaths: new Set([""]),
       };
 
       const runSelect = document.querySelector("#runSelect");
@@ -269,6 +284,7 @@
 
       async function loadRuns() {
         const data = await api("/api/runs");
+        const previousRun = state.run;
         runSelect.innerHTML = "";
         for (const run of data.runs) {
           const option = document.createElement("option");
@@ -276,6 +292,7 @@
           option.textContent = run.name;
           runSelect.appendChild(option);
         }
+        if (data.runs.some((run) => run.name === previousRun)) runSelect.value = previousRun;
         state.run = runSelect.value || "";
         if (!state.run) {
           treeRoot.innerHTML = "";
@@ -294,20 +311,39 @@
       function renderTreeNode(node) {
         const wrapper = document.createElement("ul");
         const li = document.createElement("li");
+        li.className = "tree-node";
+        const row = document.createElement("div");
+        row.className = "tree-row";
+        const hasChildren = Boolean(node.children?.length);
+        const children = hasChildren ? document.createElement("ul") : null;
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "tree-toggle";
+        toggle.disabled = !hasChildren;
+        const expanded = state.expandedPaths.has(node.path);
+        toggle.textContent = hasChildren ? (expanded ? "▾" : "▸") : "·";
+        toggle.setAttribute("aria-label", expanded ? "折叠目录" : "展开目录");
         const button = document.createElement("button");
         button.type = "button";
-        button.className = node.is_material ? "material" : "";
-        button.textContent = `${node.children?.length ? "▾" : "•"} ${node.name}`;
+        button.className = `tree-label${node.is_material ? " material" : ""}`;
+        button.textContent = `${hasChildren ? "📁" : "📄"} ${node.name}`;
         button.title = node.path || node.name;
         if (node.is_material) {
           button.addEventListener("click", () => selectMaterial(node.path, button));
         }
-        li.appendChild(button);
-        if (node.children?.length) {
-          const children = document.createElement("ul");
+        row.append(toggle, button);
+        li.appendChild(row);
+        if (children) {
           for (const child of node.children) {
             children.append(...renderTreeNode(child).children);
           }
+          children.hidden = !expanded;
+          toggle.addEventListener("click", () => {
+            children.hidden = !children.hidden;
+            toggle.textContent = children.hidden ? "▸" : "▾";
+            if (children.hidden) state.expandedPaths.delete(node.path);
+            else state.expandedPaths.add(node.path);
+          });
           li.appendChild(children);
         }
         wrapper.appendChild(li);
@@ -316,7 +352,7 @@
 
       async function selectMaterial(materialPath, button) {
         state.selectedPath = materialPath;
-        document.querySelectorAll(".tree button.active").forEach((node) => node.classList.remove("active"));
+        document.querySelectorAll(".tree .tree-label.active").forEach((node) => node.classList.remove("active"));
         button.classList.add("active");
         content.className = "empty";
         content.textContent = "读取中...";
@@ -442,12 +478,14 @@
       runSelect.addEventListener("change", async () => {
         state.run = runSelect.value;
         state.selectedPath = "";
+        state.expandedPaths = new Set([""]);
         title.textContent = "解析结果浏览器";
         subtitle.textContent = "请选择左侧材料目录";
         await loadTree().catch((error) => setError(error.message));
       });
       refreshButton.addEventListener("click", () => loadRuns().catch((error) => setError(error.message)));
 
+      window.resultBrowserLoadRuns = loadRuns;
       loadRuns().catch((error) => setError(error.message));
     </script>
     <script src="/jobs.js"></script>

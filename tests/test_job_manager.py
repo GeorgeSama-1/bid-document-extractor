@@ -187,6 +187,28 @@ def test_boolean_flags_are_strict(manager_parts, value: str) -> None:
         )
 
 
+def test_optional_engines_can_be_disabled_without_vlm_configuration(manager_parts) -> None:
+    view = create(
+        manager_parts[0],
+        enable_pp_structure="false",
+        pp_structure_device="cpu",
+        enable_vlm_table="false",
+        vlm_endpoint="",
+        vlm_model="",
+    )
+
+    assert view.parameters.enable_pp_structure is False
+    assert view.parameters.pp_structure_device == "cpu"
+    assert view.parameters.enable_vlm_table is False
+    assert view.parameters.vlm_endpoint == ""
+    assert view.parameters.vlm_model == ""
+
+
+def test_pp_structure_device_is_strict(manager_parts) -> None:
+    with pytest.raises(JobValidationError, match="gpu or cpu"):
+        create(manager_parts[0], pp_structure_device="cuda:0")
+
+
 def test_defaults_and_exact_boundaries_are_persisted(manager_parts) -> None:
     manager, store, _, _, _, _, _ = manager_parts
     view = manager.create_job(
@@ -712,3 +734,37 @@ def test_start_marks_interrupted_and_shutdown_delegates(manager_parts) -> None:
     assert secrets.get("old") is None
     manager.shutdown()
     assert scheduler.shutdown_calls == 1
+
+
+def test_delete_terminal_job_removes_all_managed_data(manager_parts) -> None:
+    manager, store, _, _, secrets, _, tmp_path = manager_parts
+    view = create(manager)
+    store.update_status(view.id, JobStatus.RUNNING)
+    store.update_status(view.id, JobStatus.SUCCEEDED)
+    output = tmp_path / "outputs" / f"job_{view.id}" / "result.txt"
+    output.write_text("result", encoding="utf-8")
+    log = tmp_path / "service_data/logs" / f"{view.id}.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("log", encoding="utf-8")
+    archive = tmp_path / "service_data/archives" / f"{view.id}.zip"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"zip")
+
+    assert manager.delete(view.id) == view.id
+
+    assert store.get(view.id) is None
+    assert secrets.get(view.id) is None
+    assert not (tmp_path / "service_data/uploads" / view.id).exists()
+    assert not (tmp_path / "outputs" / f"job_{view.id}").exists()
+    assert not log.exists()
+    assert not archive.exists()
+
+
+def test_delete_rejects_active_job_and_clear_history_preserves_it(manager_parts) -> None:
+    manager = manager_parts[0]
+    active = create(manager)
+
+    with pytest.raises(JobConflictError, match="cancelled before deletion"):
+        manager.delete(active.id)
+
+    assert manager.clear_history() == {"deleted": [], "active": [active.id]}

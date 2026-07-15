@@ -190,6 +190,11 @@ class JobStore:
             ).fetchall()
         return [self._to_record(row) for row in rows]
 
+    def delete(self, job_id: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        return cursor.rowcount == 1
+
     def update_status(
         self,
         job_id: str,

@@ -137,7 +137,7 @@ class SubprocessJobRunner:
 
     def _build_argv(self, job: JobRecord) -> list[str]:
         parameters = job.parameters
-        return [
+        argv = [
             self._python_executable,
             "-m",
             "bid_knowledge.cli",
@@ -149,9 +149,9 @@ class SubprocessJobRunner:
             "--path-root",
             parameters.path_root,
             "--enable-pp-structure",
-            "true",
+            self._boolean(parameters.enable_pp_structure),
             "--pp-structure-device",
-            "gpu",
+            parameters.pp_structure_device,
             "--pp-structure-use-doc-orientation-classify",
             self._boolean(parameters.pp_structure_use_doc_orientation_classify),
             "--pp-structure-use-doc-unwarping",
@@ -159,22 +159,27 @@ class SubprocessJobRunner:
             "--pp-structure-use-textline-orientation",
             self._boolean(parameters.pp_structure_use_textline_orientation),
             "--enable-vlm-table",
-            "true",
-            "--vlm-table-endpoint",
-            parameters.vlm_endpoint,
-            "--vlm-table-model",
-            parameters.vlm_model,
-            "--vlm-table-api-key-env",
-            "VLM_API_KEY",
-            "--vlm-table-timeout",
-            str(parameters.vlm_timeout),
-            "--vlm-table-max-tokens",
-            str(parameters.vlm_max_tokens),
-            "--vlm-table-workers",
-            str(parameters.vlm_workers),
-            "--progress",
-            "true",
+            self._boolean(parameters.enable_vlm_table),
         ]
+        if parameters.enable_vlm_table:
+            argv.extend(
+                [
+                    "--vlm-table-endpoint",
+                    parameters.vlm_endpoint,
+                    "--vlm-table-model",
+                    parameters.vlm_model,
+                    "--vlm-table-api-key-env",
+                    "VLM_API_KEY",
+                    "--vlm-table-timeout",
+                    str(parameters.vlm_timeout),
+                    "--vlm-table-max-tokens",
+                    str(parameters.vlm_max_tokens),
+                    "--vlm-table-workers",
+                    str(parameters.vlm_workers),
+                ]
+            )
+        argv.extend(["--progress", "true"])
+        return argv
 
     @staticmethod
     def _build_environment(job: JobRecord, api_key: str) -> dict[str, str]:

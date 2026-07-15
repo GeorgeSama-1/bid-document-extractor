@@ -226,6 +226,20 @@ def create_app(job_manager: JobManager | Any | None = None) -> FastAPI:
         except Exception as exc:
             raise manager_error(exc) from None
 
+    @application.delete("/api/jobs/{job_id}")
+    def delete_job(job_id: str) -> dict[str, str]:
+        try:
+            return {"deleted": manager.delete(job_id)}
+        except Exception as exc:
+            raise manager_error(exc) from None
+
+    @application.delete("/api/jobs")
+    def clear_job_history() -> dict[str, list[str]]:
+        try:
+            return manager.clear_history()
+        except Exception as exc:
+            raise manager_error(exc) from None
+
     @application.get("/api/jobs/{job_id}/files")
     def list_job_files(job_id: str) -> dict[str, object]:
         try:

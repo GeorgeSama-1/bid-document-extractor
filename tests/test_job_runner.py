@@ -181,6 +181,26 @@ def test_runner_builds_complete_cli_and_keeps_key_only_in_child_environment(
     assert progress == [(3, 7, "Detecting tables")]
 
 
+def test_runner_can_disable_optional_engines_and_select_cpu(tmp_path: Path) -> None:
+    job = make_job(
+        tmp_path,
+        parameters=JobParameters(
+            path_root="PDF",
+            enable_pp_structure=False,
+            pp_structure_device="cpu",
+            enable_vlm_table=False,
+        ),
+    )
+
+    argv = SubprocessJobRunner(python_executable="python")._build_argv(job)
+
+    assert argv[argv.index("--enable-pp-structure") + 1] == "false"
+    assert argv[argv.index("--pp-structure-device") + 1] == "cpu"
+    assert argv[argv.index("--enable-vlm-table") + 1] == "false"
+    assert not any(value.startswith("--vlm-table-") for value in argv)
+    assert argv[-2:] == ["--progress", "true"]
+
+
 def test_runner_redacts_spawn_exception_and_reports_failure(tmp_path) -> None:
     def fail_to_spawn(*_args, **_kwargs):
         raise OSError("could not use sentinel-key")
