@@ -2567,6 +2567,295 @@ def _copy_image_item_for_submaterial(
     return item
 
 
+_NUMBERED_SUBSECTION_HEADING = re.compile(
+    r"^\s*[（(](\d+(?:\.\d+)*)[）)](?:\s*[、.．]\s*|\s+)(\S.*)$"
+)
+
+
+def _numbered_subsection_heading(
+    block: PdfTextBlock,
+) -> tuple[tuple[int, ...], str] | None:
+    text = re.sub(r"\s+", " ", str(block.text or "")).strip()
+    match = _NUMBERED_SUBSECTION_HEADING.match(text)
+    if not match:
+        return None
+    body = match.group(2).strip()
+    if not body or len(text) > 120 or re.search(r"[。；;，,：:]$", body):
+        return None
+    marker = tuple(int(part) for part in match.group(1).split("."))
+    title = f"（{'.'.join(str(part) for part in marker)}）、 {body}"
+    return marker, title
+
+
+def _numbered_subsection_anchors(
+    text_blocks: list[PdfTextBlock],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for block in sorted(
+        text_blocks,
+        key=lambda item: (item.page_no, _block_top_y(item) or 0.0, item.block_no),
+    ):
+        parsed = _numbered_subsection_heading(block)
+        if parsed is None:
+            continue
+        marker, title = parsed
+        candidates.append(
+            {
+                "marker": marker,
+                "title": title,
+                "block": block,
+                "page_no": block.page_no,
+                "top_y": _block_top_y(block),
+            }
+        )
+
+    selected: list[dict[str, Any]] = []
+    last_root = -1
+    last_by_root: dict[int, tuple[int, ...]] = {}
+    for candidate in candidates:
+        marker = candidate["marker"]
+        root_number = int(marker[0])
+        if len(marker) == 1:
+            if root_number <= last_root:
+                continue
+            selected.append(candidate)
+            last_root = root_number
+            last_by_root[root_number] = marker
+            continue
+        if root_number != last_root:
+            continue
+        previous = last_by_root.get(root_number, (root_number,))
+        if marker <= previous:
+            continue
+        selected.append(candidate)
+        last_by_root[root_number] = marker
+
+    root_count = sum(1 for item in selected if len(item["marker"]) == 1)
+    has_nested = any(len(item["marker"]) > 1 for item in selected)
+    if root_count < 2 and not (root_count == 1 and has_nested):
+        return []
+    return selected
+
+
+def _replace_exported_item(
+    source: dict[str, Any],
+    copied: dict[str, Any],
+) -> None:
+    old_paths = {
+        Path(str(source[key]))
+        for key in ("file_path", "json_path")
+        if source.get(key)
+    }
+    new_paths = {
+        Path(str(copied[key]))
+        for key in ("file_path", "json_path")
+        if copied.get(key)
+    }
+    source.clear()
+    source.update(copied)
+    for path in old_paths - new_paths:
+        path.unlink(missing_ok=True)
+
+
+def _write_numbered_subsection_packages(
+    *,
+    material_dir: Path,
+    section_path: str,
+    path_parts: list[str],
+    pdf_path: str | Path | None,
+    doc: Any,
+    text_blocks: list[PdfTextBlock],
+    table_items: list[dict[str, Any]],
+    image_items: list[dict[str, Any]],
+    page_material_items: list[dict[str, Any]],
+    section_end_page: int,
+    section_end_y: float | None,
+    image_bytes_resolver: Callable[[dict[str, Any]], tuple[bytes, str]] | None,
+) -> dict[str, Any]:
+    anchors = _numbered_subsection_anchors(text_blocks)
+    if not anchors:
+        return {
+            "ranges": [],
+            "top_entries": [],
+            "materials": [],
+            "text_items": [],
+        }
+
+    directories_by_marker: dict[tuple[int, ...], Path] = {}
+    titles_by_marker: dict[tuple[int, ...], str] = {}
+    entries_by_parent: dict[tuple[int, ...] | None, list[tuple[str, Path]]] = defaultdict(list)
+    material_meta: list[dict[str, Any]] = []
+    written_text_items: list[dict[str, Any]] = []
+
+    for index, anchor in enumerate(anchors):
+        marker = anchor["marker"]
+        next_anchor = anchors[index + 1] if index + 1 < len(anchors) else None
+        start_page = int(anchor["page_no"])
+        start_y = anchor.get("top_y")
+        end_page = int(next_anchor["page_no"]) if next_anchor else int(section_end_page)
+        end_y = next_anchor.get("top_y") if next_anchor else section_end_y
+
+        parent_marker: tuple[int, ...] | None = None
+        for prefix_length in range(len(marker) - 1, 0, -1):
+            prefix = marker[:prefix_length]
+            if prefix in directories_by_marker:
+                parent_marker = prefix
+                break
+        parent_dir = directories_by_marker.get(parent_marker, material_dir)
+        child_title = str(anchor["title"])
+        child_dir = ensure_dir(parent_dir / _safe_dirname(child_title))
+        directories_by_marker[marker] = child_dir
+        titles_by_marker[marker] = child_title
+        entries_by_parent[parent_marker].append((child_title, child_dir / "material.md"))
+
+        child_blocks = [
+            block
+            for block in text_blocks
+            if _item_in_range(
+                block.page_no,
+                _block_top_y(block),
+                start_page,
+                start_y,
+                end_page,
+                end_y,
+            )
+        ]
+        child_tables = [
+            table
+            for table in table_items
+            if _table_in_range(
+                table,
+                start_page,
+                start_y,
+                end_page,
+                end_y,
+            )
+        ]
+        child_images = [
+            image
+            for image in image_items
+            if _item_in_range(
+                int(image.get("page_no") or 0),
+                _bbox_top_y(image.get("rect")),
+                start_page,
+                start_y,
+                end_page,
+                end_y,
+            )
+        ]
+        child_page_material_items = _page_material_items_in_range(
+            page_material_items,
+            start_page,
+            start_y,
+            end_page,
+            end_y,
+        )
+        ancestor_titles = [
+            titles_by_marker[marker[:prefix_length]]
+            for prefix_length in range(1, len(marker))
+            if marker[:prefix_length] in titles_by_marker
+        ]
+        child_path_parts = [*path_parts, *ancestor_titles]
+        text_item = _write_text_item(
+            item_dir=ensure_dir(child_dir / "text_items"),
+            folder_title=child_title,
+            text_blocks=child_blocks,
+            section_path=section_path,
+            path_parts=[*child_path_parts, child_title],
+            pdf_path=pdf_path,
+        )
+        if text_item:
+            written_text_items.append(text_item)
+
+        copied_tables: list[dict[str, Any]] = []
+        for table_index, table in enumerate(child_tables, start=1):
+            source_table = {
+                **table,
+                "_top_y": _table_assignment_top_y(table) or 0.0,
+            }
+            copied = _copy_table_item_for_submaterial(
+                table=source_table,
+                child_dir=child_dir,
+                child_title=child_title,
+                section_path=section_path,
+                folder_parts=[*child_path_parts, child_title],
+                pdf_path=pdf_path,
+                table_index=table_index,
+            )
+            copied_tables.append(copied)
+            _replace_exported_item(table, copied)
+
+        copied_images: list[dict[str, Any]] = []
+        for image_index, image in enumerate(child_images, start=1):
+            source_image = {
+                **image,
+                "_top_y": _bbox_top_y(image.get("rect")) or 0.0,
+            }
+            copied = _copy_image_item_for_submaterial(
+                image=source_image,
+                child_dir=child_dir,
+                child_title=child_title,
+                section_path=section_path,
+                folder_parts=[*child_path_parts, child_title],
+                pdf_path=pdf_path,
+                image_index=image_index,
+                image_bytes_resolver=image_bytes_resolver,
+                doc=doc,
+            )
+            if copied is None:
+                continue
+            copied_images.append(copied)
+            _replace_exported_item(image, copied)
+
+        material_meta.append(
+            _write_material_package(
+                material_dir=child_dir,
+                subfolder={
+                    "folder_title": child_title,
+                    "page_start": start_page,
+                    "page_end": end_page,
+                    "start_y": start_y,
+                    "end_y": end_y,
+                    "start_block_id": anchor["block"].block_id,
+                    "end_block_id": (
+                        next_anchor["block"].block_id if next_anchor else None
+                    ),
+                },
+                section_path=section_path,
+                path_parts=child_path_parts,
+                pdf_path=pdf_path,
+                doc=doc,
+                text_blocks=child_blocks,
+                text_item=text_item,
+                table_items=copied_tables,
+                image_items=copied_images,
+                page_material_items=child_page_material_items,
+                image_bytes_resolver=image_bytes_resolver,
+                allow_submaterials=False,
+            )
+        )
+
+    for parent_marker, entries in entries_by_parent.items():
+        if parent_marker is None:
+            continue
+        _append_child_links_to_markdown(directories_by_marker[parent_marker], entries)
+
+    first_anchor = anchors[0]
+    return {
+        "ranges": [
+            {
+                "start_page": int(first_anchor["page_no"]),
+                "start_y": first_anchor.get("top_y"),
+                "end_page": int(section_end_page),
+                "end_y": section_end_y,
+            }
+        ],
+        "top_entries": entries_by_parent.get(None, []),
+        "materials": material_meta,
+        "text_items": written_text_items,
+    }
+
+
 def _write_attachment_submaterials(
     material_dir: Path,
     section_path: str,
@@ -4562,6 +4851,48 @@ def package_module_artifacts(
                 root_folder_title = path_parts[-1] if path_parts else section_path
                 root_image_only = _is_authorization_attachment_leaf(section_path)
                 child_scopes = _child_scopes_for_parent_section(section_path, grouped_candidates, inferred_scope_map)
+                numbered_packages = {
+                    "ranges": [],
+                    "top_entries": [],
+                    "materials": [],
+                    "text_items": [],
+                }
+                is_pdf_toc_leaf = any(
+                    candidate.candidate_type == "pdf_toc_leaf"
+                    or (
+                        isinstance(candidate.material_evidence, dict)
+                        and candidate.material_evidence.get("source")
+                        == "pdf_toc_leaf"
+                    )
+                    for candidate in section_candidates
+                )
+                if is_pdf_toc_leaf and pages:
+                    numbered_packages = _write_numbered_subsection_packages(
+                        material_dir=section_dir,
+                        section_path=section_path,
+                        path_parts=path_parts,
+                        pdf_path=pdf_path,
+                        doc=doc,
+                        text_blocks=module_blocks,
+                        table_items=tables_index,
+                        image_items=images_index,
+                        page_material_items=module_page_material_items,
+                        section_end_page=pages[-1],
+                        section_end_y=(
+                            candidate_scope.get("end_y")
+                            if candidate_scope
+                            and int(candidate_scope.get("end_page") or pages[-1])
+                            == pages[-1]
+                            else None
+                        ),
+                        image_bytes_resolver=image_bytes_resolver,
+                    )
+                    child_scopes = [
+                        *child_scopes,
+                        *numbered_packages["ranges"],
+                    ]
+                    material_index.extend(numbered_packages["materials"])
+                    text_index.extend(numbered_packages["text_items"])
                 root_blocks = [
                     block
                     for block in module_blocks
@@ -4634,6 +4965,10 @@ def package_module_artifacts(
                         allow_submaterials=not _is_authorization_attachment_leaf(section_path),
                         image_only=root_image_only,
                     )
+                )
+                _append_child_links_to_markdown(
+                    section_dir,
+                    numbered_packages["top_entries"],
                 )
             elif section_subfolders:
                 _write_material_index_markdown(section_dir, path_parts[-1] if path_parts else section_path, material_markdown_entries)

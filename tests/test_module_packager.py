@@ -103,6 +103,113 @@ def test_package_module_artifacts_exports_named_items_under_module(tmp_path: Pat
     assert image_file_2.exists()
 
 
+def test_pdf_toc_leaf_splits_numbered_subsections_and_keeps_parent_preface(
+    tmp_path: Path,
+) -> None:
+    section_path = (
+        "PDF / 3、 补充文件 / 3.8、 商务评分支撑材料 / "
+        "3.8.2、 高质量发展评价 / 3.8.2.1、 绿色发展规划及管理体系认证"
+    )
+    candidate = _candidate(
+        section_path,
+        1,
+        4,
+        "3.8.2、高质量发展评价",
+    ).model_copy(
+        update={
+            "candidate_type": "pdf_toc_leaf",
+            "material_evidence": {
+                "source": "pdf_toc_leaf",
+                "start_y": 10.0,
+                "end_y": None,
+            },
+        }
+    )
+    blocks = [
+        PdfTextBlock(block_id="root", page_no=1, text="3.8.2.1、绿色发展规划及管理体系认证", bbox=[0, 10, 400, 30], block_no=1),
+        PdfTextBlock(block_id="root-preface", page_no=1, text="父章节在首个子章节前的说明。", bbox=[0, 40, 400, 60], block_no=2),
+        PdfTextBlock(block_id="n1", page_no=1, text="（1）、建立绿色发展规划制度", bbox=[0, 100, 400, 120], block_no=3),
+        PdfTextBlock(block_id="n1-body", page_no=1, text="绿色发展规划正文。", bbox=[0, 130, 400, 150], block_no=4),
+        PdfTextBlock(block_id="n2", page_no=2, text="（2）、能源管理体系证书（无）", bbox=[0, 20, 400, 40], block_no=5),
+        PdfTextBlock(block_id="n2-body", page_no=2, text="无。", bbox=[0, 50, 400, 70], block_no=6),
+        PdfTextBlock(block_id="n3", page_no=2, text="（3）、质量管理体系、职业健康安全管理体系及环境管理体系证书", bbox=[0, 100, 500, 120], block_no=7),
+        PdfTextBlock(block_id="n3-preface", page_no=2, text="三项管理体系证书总体说明。", bbox=[0, 130, 400, 150], block_no=8),
+        PdfTextBlock(block_id="n31", page_no=2, text="（3.1）、质量管理体系认证证书", bbox=[0, 200, 400, 220], block_no=9),
+        PdfTextBlock(block_id="n31-body", page_no=2, text="质量管理体系证书正文。", bbox=[0, 230, 400, 250], block_no=10),
+        PdfTextBlock(block_id="n32", page_no=3, text="（3.2）、职业健康安全管理体系认证证书", bbox=[0, 20, 400, 40], block_no=11),
+        PdfTextBlock(block_id="n32-body", page_no=3, text="职业健康安全证书正文。", bbox=[0, 50, 400, 70], block_no=12),
+        PdfTextBlock(block_id="n33", page_no=4, text="（3.3）、环境管理体系认证证书", bbox=[0, 20, 400, 40], block_no=13),
+        PdfTextBlock(block_id="n33-body", page_no=4, text="环境管理体系证书正文。", bbox=[0, 50, 400, 70], block_no=14),
+    ]
+    images = [
+        {"image_id": "root-image", "page_no": 1, "xref": 1, "width": 501, "height": 401, "rect": [10, 65, 180, 95], "ext": "png"},
+        {"image_id": "n1-image", "page_no": 1, "xref": 2, "width": 502, "height": 402, "rect": [10, 160, 180, 220], "ext": "png"},
+        {"image_id": "n3-image", "page_no": 2, "xref": 3, "width": 503, "height": 403, "rect": [10, 160, 180, 190], "ext": "png"},
+        {"image_id": "n31-image", "page_no": 2, "xref": 4, "width": 504, "height": 404, "rect": [10, 260, 180, 500], "ext": "png"},
+        {"image_id": "n32-image", "page_no": 3, "xref": 5, "width": 505, "height": 405, "rect": [10, 80, 180, 500], "ext": "png"},
+        {"image_id": "n33-image", "page_no": 4, "xref": 6, "width": 506, "height": 406, "rect": [10, 80, 180, 500], "ext": "png"},
+    ]
+    tables = [
+        ParsedTable(
+            table_id="n3-table",
+            page_no=2,
+            rows=[["体系", "状态"], ["管理体系", "有效"]],
+            bbox=[250, 160, 500, 190],
+        )
+    ]
+
+    package_module_artifacts(
+        candidates=[candidate],
+        blocks=blocks,
+        tables=tables,
+        images=images,
+        out_dir=tmp_path,
+        image_bytes_resolver=lambda item: (
+            f"image-{item['image_id']}".encode(),
+            str(item.get("ext") or "png"),
+        ),
+    )
+
+    root = (
+        tmp_path
+        / "modules"
+        / "3、 补充文件"
+        / "3.8、 商务评分支撑材料"
+        / "3.8.2、 高质量发展评价"
+        / "3.8.2.1、 绿色发展规划及管理体系认证"
+    )
+    n1 = root / "（1）、 建立绿色发展规划制度"
+    n2 = root / "（2）、 能源管理体系证书（无）"
+    n3 = root / "（3）、 质量管理体系、职业健康安全管理体系及环境管理体系证书"
+    n31 = n3 / "（3.1）、 质量管理体系认证证书"
+    n32 = n3 / "（3.2）、 职业健康安全管理体系认证证书"
+    n33 = n3 / "（3.3）、 环境管理体系认证证书"
+
+    root_md = (root / "material.md").read_text(encoding="utf-8")
+    n3_md = (n3 / "material.md").read_text(encoding="utf-8")
+    assert "父章节在首个子章节前的说明。" in root_md
+    assert "绿色发展规划正文。" not in root_md
+    assert "- [（1）、 建立绿色发展规划制度]" in root_md
+    assert "- [（2）、 能源管理体系证书（无）]" in root_md
+    assert "- [（3）、 质量管理体系、职业健康安全管理体系及环境管理体系证书]" in root_md
+    assert "三项管理体系证书总体说明。" in n3_md
+    assert "| 体系 | 状态 |" in n3_md
+    assert "质量管理体系证书正文。" not in n3_md
+    assert "- [（3.1）、 质量管理体系认证证书]" in n3_md
+    assert "- [（3.2）、 职业健康安全管理体系认证证书]" in n3_md
+    assert "- [（3.3）、 环境管理体系认证证书]" in n3_md
+    assert "绿色发展规划正文。" in (n1 / "material.md").read_text(encoding="utf-8")
+    assert "无。" in (n2 / "material.md").read_text(encoding="utf-8")
+    assert "质量管理体系证书正文。" in (n31 / "material.md").read_text(encoding="utf-8")
+    assert "职业健康安全证书正文。" in (n32 / "material.md").read_text(encoding="utf-8")
+    assert "环境管理体系证书正文。" in (n33 / "material.md").read_text(encoding="utf-8")
+    assert len(list((root / "image_items").glob("*.png"))) == 1
+    assert len(list((n3 / "image_items").glob("*.png"))) == 1
+    assert len(list((n31 / "image_items").glob("*.png"))) == 1
+    assert len(list((n32 / "image_items").glob("*.png"))) == 1
+    assert len(list((n33 / "image_items").glob("*.png"))) == 1
+
+
 def test_package_module_artifacts_uses_previous_page_heading_when_current_page_has_no_new_heading(tmp_path: Path) -> None:
     candidates = [
         _candidate(
